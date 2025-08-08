@@ -1,0 +1,135 @@
+---
+title: "Emulating human land use behaviours using probabilistic ML"
+output: html_document
+date: "2025-08-07"
+---
+
+## Markov Decision Processes to model herding practices in Mongolia
+
+*Markov Decision Processes (MDPs) is a probabilistic framework that is computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impact both actions and states*
+
+#### Github repository
+
+###### https://github.com/kbatpurev/Herder_mdps.git
+
+===============================================================================================
+
+#### V1 - Toy version with two agents with softmax policy 
+
+##### Part 1 - Problem formulation
+##### Part 2 - Definition of agents, actions and states
+##### Part 3 - Results
+
+
+#### About this diary
+They way i have perceived how this diary should work is to compile learning material that piqued my interest (for example something new, or interesting fact from the course data) rather than jot down everything that i came across the RHDS book.I hope this is an acceptable approach.  
+
+```{r setup, include=FALSE}
+library(jsonlite)
+library(highr)
+library(tidyverse)
+library(Hmisc)
+library(dplyr)
+library(quantmod) # for findPeaks fxn
+library(MDPtoolbox)
+
+# plotting libraries
+library(corrplot)
+library(RColorBrewer)
+library(ggthemes)
+library(ggpubr)
+library(ggplot2)
+library(Cairo)
+library(extrafont)
+extrafont::loadfonts()
+library(kableExtra)
+library(truncnorm)
+```
+===============================================================================================
+
+#### Problem formulation
+
+
+```{r problem formulation}
+land_grid_x <- 5
+land_grid_y <- 5
+all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
+
+# Actions (stocking rates)
+actions <- c("<100", "200-400", "400-600", ">600")
+action_income <- c("<100" = 0.8, "200-400" = 2.0, "400-600" = 2.5, ">600" = 3.5)
+action_penalty <- c("<100" = 1.0, "200-400" = 1.0, "400-600" = 1.0, ">600" = 0.7)
+
+# Rangeland states
+r_states <- c("intact", "good", "poor", "degraded")
+r_code <- setNames(0:3, r_states)
+
+# Weather probabilities
+weather_probs <- c("drought" = 0.3, "rainy" = 0.2, "normal" = 0.5)
+
+#Weather, transition and reward functions
+#---------------------------------------------------------------------------
+draw_weather <- function() {
+  sample(names(weather_probs), size=1, prob = weather_probs)
+}
+
+transition_rangeland <- function(state, action, weather) {
+  if (state == "degraded") return("degraded")  # terminal state
+  
+  probs <- NULL
+  
+  # Define probabilities based on action and weather
+  if (action == ">600") {
+    if (weather == "drought") {
+      probs <- c("degraded" = 0.9, "poor" = 0.1)
+    } else if (weather == "normal") {
+      probs <- c("degraded" = 0.7, "poor" = 0.3)
+    } else {  # rainy
+      probs <- c("poor" = 0.8, "good" = 0.2)
+    }
+    
+  } else if (action == "400-600") {
+    if (weather == "drought") {
+      probs <- c("poor" = 0.6, "good" = 0.4)
+    } else if (weather == "normal") {
+      probs <- c("good" = 0.7, "intact" = 0.3)
+    } else {
+      probs <- c("good" = 0.4, "intact" = 0.6)
+    }
+    
+  } else if (action == "200-400") {
+    if (weather == "drought") {
+      probs <- c("good" = 0.3, "intact" = 0.7)
+    } else if (weather == "normal") {
+      probs <- c("good" = 0.1, "intact" = 0.9)
+    } else {
+      probs <- c("intact" = 1.0)
+    }
+    
+  } else {  # action == "<100"
+    probs <- c("intact" = 1.0)
+  }
+  
+  return(sample(names(probs), 1, prob = probs))
+}
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
