@@ -1,6 +1,9 @@
 ---
-title: "Exploring human dimensions of market-based incentive design with reinfocement learning"
-output: html_document
+title: "Proof of concept - Exploring human dimensions of market-based incentive design with reinfocement
+  learning"
+output:
+  pdf_document: default
+  html_document: default
 date: "2025-08-07"
 ---
 
@@ -11,7 +14,7 @@ date: "2025-08-07"
 
 #### Github repository
 
-###### https://github.com/kbatpurev/Herder_mdps.git
+###### https://github.com/kbatpurev/Herder_MDP_rep.git
 
 ===============================================================================================
 
@@ -24,7 +27,6 @@ date: "2025-08-07"
 library(jsonlite)
 library(highr)
 library(tidyverse)
-library(Hmisc)
 library(dplyr)
 library(quantmod) # for findPeaks fxn
 library(MDPtoolbox)
