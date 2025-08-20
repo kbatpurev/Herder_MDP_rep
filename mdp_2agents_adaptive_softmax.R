@@ -1,28 +1,5 @@
----
-title: "Exploring human dimensions of market-based incentive design with reinfocement learning"
-output: html_document
-date: "2025-08-07"
----
-
-### Markov Decision Processes to predict ecosystem condition in Mongolia under different herding practices
-
-*Markov Decision Processes (MDPs) is a probabilistic framework that is computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impact both actions and states.*
-
-
-#### Github repository
-
-###### https://github.com/kbatpurev/Herder_mdps.git
-
-===============================================================================================
-
-#### Model 1 - Action based design 
-###### (V1. Toy version with two agents with softmax policy)
-
-```{r setup, include=FALSE}
 .libPaths()
 .libPaths(new="C:/Data/RStudio")
-library(jsonlite)
-library(highr)
 library(tidyverse)
 library(Hmisc)
 library(dplyr)
@@ -40,16 +17,11 @@ library(extrafont)
 extrafont::loadfonts()
 library(kableExtra)
 library(truncnorm)
-```
 
 
-
-##### **1. Problem formulation**
-
-##### Fundamentals
-Here we create a 5 x 5 raster where two agents herd goats in the same space. We define 4 different actions: choosing to have herd sizes a)less than 100,b) 200-400, c)400-600 and d)600 and above. Each of these actions bring rewards or income to varying degrees. The rangeland can be in one of four states: intact, good, poor or degraded. And the weather conditions are drawn from a probability distribution where a given year has 50% of being in average condition, 30% chance of being in drought condition and 20% chance of being rainy (higher than average rainfall). 
-
-```{r problem formulation}
+#Set up and parameters
+#---------------------------------------------------------------------
+# land_grid
 land_grid_x <- 5
 land_grid_y <- 5
 all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
@@ -57,6 +29,7 @@ all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
 # Actions (stocking rates)
 actions <- c("<100", "200-400", "400-600", ">600")
 action_income <- c("<100" = 0.8, "200-400" = 2.0, "400-600" = 2.5, ">600" = 3.5)
+#action_penalty <- c("<100" = 1.0, "200-400" = 1.0, "400-600" = 1.0, ">600" = 0.7)
 
 # Rangeland states
 r_states <- c("intact", "good", "poor", "degraded")
@@ -70,11 +43,7 @@ weather_probs <- c("drought" = 0.3, "rainy" = 0.2, "normal" = 0.5)
 draw_weather <- function() {
   sample(names(weather_probs), size=1, prob = weather_probs)
 }
-```
 
-##### Transition matrix
-This is a long if then statement that defines how rangeland states relate to each action and weather condition combination. This needs to be coded up more efficiently for a hyper parameter grid search later on. But for now it is more of an illustration tool of how we perceive actions and climatic conditions impact the rangeland states. 
-```{r transition matrix, echo=TRUE}
 transition_rangeland <- function(state, action, weather) {
   if (state == "degraded") return("degraded")  # terminal state
   
@@ -114,19 +83,7 @@ transition_rangeland <- function(state, action, weather) {
   
   return(sample(names(probs), 1, prob = probs))
 }
-```
 
-
-##### **2. Agents, actions and rewards**
-
-##### Reward structure and policy
-Here we define how income from actions (rewards) are calculated. Rewards are a function of herd size (type of action), actions of the other agent. The specific strategy an agent employs to weigh the pros and cons of each reward is called policy, in this case this strategy is a "softmax" approach which is to maximise rewards with a moderate tau (temperature) of 1. Temperature settings for the policy can vary between 2 and 0. 
-
-###### *Lower tau → more greedy (e.g., 0.1)*
-###### *Higher tau → more exploratory (e.g., 2.0)*
-###### *tau = 1 is a moderate setting (default in many systems)*
-
-```{r compute return}
 compute_reward <- function(action, same_cell, revisit,cell_condition) {
   r <- action_income[action]
   if (same_cell) r <- r * 0.7
@@ -149,6 +106,9 @@ softmax <- function(x, tau = 1.0) {
   exp_x <- exp((x - max(x)) / tau)
   exp_x / sum(exp_x)
 }
+
+#Agent Structure
+#---------------------------------------------------------------------
 create_agent <- function(name, tau = 1.0) {
   list(
     name = name,
@@ -159,13 +119,12 @@ create_agent <- function(name, tau = 1.0) {
     tau = tau
   )
 }
-```
 
-##### Action selection in space
+#tau is the softmax temperature. 
+#Lower tau → more greedy (e.g., 0.1)
+#Higher tau → more exploratory (e.g., 2.0)
+#tau = 1 is a moderate setting (default in many systems)
 
-Agent selects actions depending on where they are in the landscape in relation to other agents - this is to emulate the preference for non overlapping grazing practices employed by herders, which only exists as a silent/social agreement and are often breached by outsiders and desperate herders. Agents also have to consider the last time they were in a cell, because they are penalised if they return to the same cell immediately - this is an attempt to emulate ecosystem recovery from land use. If an agent hasn't been to a cell before and never tried an action before then they assume reward to be an average of 2.This is clearly a naive and overly optimistic approach. Future simulation should focus on testing the sensitivity of this parameter.
-
-```{r action selection, echo=TRUE}
 select_action <- function(agent) {
   candidates <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1), action = actions)
   candidates$reward <- apply(candidates, 1, function(row) {
@@ -173,9 +132,16 @@ select_action <- function(agent) {
     if (!is.null(agent$reward_memory[[key]]) && agent$memory_count[[key]] > 0) {
       avg <- agent$reward_memory[[key]] / agent$memory_count[[key]]
     } else {
-      avg <- 2 
+      avg <- 2 #if an agent hasn't been to a cell before and never tried an action before then they assume reward to be an average of 2
     }
-   
+    #this is clearly a naive and potentially overly optimistic approach. Alternative is doing a Bayesian smoothing based on prior knowledge.
+    #through a small step like this:
+    #prior_mean <- 1.5
+    #prior_count <- 1
+    #numerator <- ifelse(!is.null(agent$reward_memory[[key]]), agent$reward_memory[[key]], 0) + prior_mean * prior_count
+    #denominator <- ifelse(!is.null(agent$memory_count[[key]]), agent$memory_count[[key]], 0) + prior_count
+    #avg <- numerator / denominator
+    
     # Safe revisit check
     same_as_last_cell <- isTRUE(agent$last_cell["x"] == as.numeric(row[["x"]]) &&
                                   agent$last_cell["y"] == as.numeric(row[["y"]]))
@@ -187,22 +153,10 @@ select_action <- function(agent) {
   choice <- sample(1:nrow(candidates), 1, prob = probs)
   return(candidates[choice, ])
 }
-```
 
-Alternative to using a constant of 2 as an average reward there is the option of using Bayesian smoothing based on prior knowledge through a small step like this: 
 
-```{r alternative - Bayesian smoothing, eval=FALSE, include=FALSE}
-prior_mean <- 1.5
-prior_count <- 1
-numerator <- ifelse(!is.null(agent$reward_memory[[key]]), agent$reward_memory[[key]], 0) + prior_mean*prior_count
-denominator <- ifelse(!is.null(agent$memory_count[[key]]), agent$memory_count[[key]], 0) + prior_count
-avg <- numerator / denominator
-```
-
-##### Simulation
-
-Simulation creates an plain of cells that all start from intact condition. Then agents start to operate in them, iteratively choosing actions and optimising rewards as described above. 
-```{r simulations, echo=TRUE}
+#Simulation loop
+#-----------------------------------------------------------------------
 simulate_adaptive <- function(steps = 100) {
   land_grid <- all_cells %>% mutate(rangeland = "intact") #assumes that all cells start from an intact condition = which is naive
   agent1 <- create_agent("A1")
@@ -253,17 +207,13 @@ simulate_adaptive <- function(steps = 100) {
   return(list(logs = logs, weather_history = weather_trace))
 }
 
-```
 
-```{r simulation result, include=FALSE}
+
 results <- simulate_adaptive(step=140)
-```
 
-
-##### Results
-
-Ecosystem degradation rate over time
-```{r data reshape, echo=FALSE, warning=FALSE}
+#Visualisation
+#--------------------------------------------------------------------------
+# Degradation percent over time
 degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
                             mutate(step = .x$step,
                                    degraded = rangeland == "degraded"))
@@ -275,12 +225,8 @@ degradation_summary <- degradation_df %>%
 ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
   geom_line(size = 1.2, color = "darkred") +
   labs(title = "Degradation Over Time", y = "% Degraded", x = "Step")
-```
 
-
-Policy mix by cell by each agent
-
-```{r data reshape policy mix, echo=FALSE, warning=FALSE}
+# Policy mix by cell
 action_df <- map2_dfr(results$logs, results$weather_history, function(res, weather) {
   tibble(
     step = res$step,
@@ -312,5 +258,110 @@ ggplot(policy_map, aes(x = x, y = y, fill = action)) +
   facet_wrap(~agent) +
   scale_fill_brewer(palette = "Set2") +
   labs(title = "Dominant Stocking Rate by Agent", x = "land_grid X", y = "land_grid Y")
-```
+
+#Value Iteration
+#----------------------------------------------------------------------
+initialize_value_function <- function(land_grid, actions, rangeland_states) {
+  expand.grid(
+    x = unique(land_grid$x),
+    y = unique(land_grid$y),
+    state = rangeland_states
+  ) %>%
+    mutate(value = 0)
+}
+
+
+get_possible_transitions <- function(current_state, action, weather) {
+  # Return full distribution from the probabilistic version of transition_rangeland()
+  if (current_state == "degraded") return(tibble(state = "degraded", prob = 1))
+  
+  # Example transition table for one action-weather combo
+  probs <- switch(action,
+                  ">600" = switch(weather,
+                                  "drought" = c("degraded" = 0.9, "poor" = 0.1),
+                                  "normal"  = c("degraded" = 0.7, "poor" = 0.3),
+                                  "rainy"   = c("poor" = 0.8, "good" = 0.2)
+                  ),
+                  "400-600" = switch(weather,
+                                     "drought" = c("poor" = 0.6, "good" = 0.4),
+                                     "normal"  = c("good" = 0.7, "intact" = 0.3),
+                                     "rainy"   = c("good" = 0.4, "intact" = 0.6)
+                  ),
+                  "200-400" = switch(weather,
+                                     "drought" = c("good" = 0.3, "intact" = 0.7),
+                                     "normal"  = c("good" = 0.1, "intact" = 0.9),
+                                     "rainy"   = c("intact" = 1.0)
+                  ),
+                  "<100" = c("intact" = 1.0)
+  )
+  
+  tibble(state = names(probs), prob = probs)
+}
+
+expected_value <- function(state, action, value_fn, weather, gamma = 0.95) {
+  transitions <- get_possible_transitions(state, action, weather)
+  
+  # Add rewards (can be adjusted further)
+  reward <- compute_reward(action, same_cell = FALSE, revisit = FALSE)  # use average case
+  
+  transitions %>%
+    left_join(value_fn, by = c("state")) %>%
+    summarise(ev = sum(prob * (reward + gamma * value))) %>%
+    pull(ev)
+}
+
+value_iteration <- function(land_grid, actions, rangeland_states, iterations = 20, gamma = 0.95) {
+  value_fn <- initialize_value_function(land_grid, actions, rangeland_states)
+  
+  for (i in 1:iterations) {
+    value_fn <- value_fn %>%
+      rowwise() %>%
+      mutate(value = {
+        weather <- draw_weather()  # stochastic weather per step
+        max(sapply(actions, function(a) expected_value(state, a, value_fn, weather, gamma)))
+      }) %>%
+      ungroup()
+  }
+  
+  return(value_fn)
+}
+
+extract_policy <- function(value_fn, actions, land_grid, rangeland_states, gamma = 0.95) {
+  policy <- value_fn %>%
+    rowwise() %>%
+    mutate(best_action = {
+      weather <- draw_weather()
+      action_values <- sapply(actions, function(a) expected_value(state, a, value_fn, weather, gamma))
+      actions[which.max(action_values)]
+    }) %>%
+    ungroup()
+  
+  return(policy)
+}
+
+value_iteration <- function(land_grid, actions, rangeland_states, iterations = 20, gamma = 0.95) {
+  value_fn <- initialize_value_function(land_grid, actions, rangeland_states)
+  
+  for (i in 1:iterations) {
+    value_fn <- value_fn %>%
+      rowwise() %>%
+      mutate(value = {
+        weather <- draw_weather()
+        max(sapply(actions, function(a) expected_value(state, a, value_fn, weather, gamma)))
+      }) %>%
+      ungroup()
+  }
+  
+  return(value_fn)
+}
+
+land_grid <- expand.grid(
+  x = 1:5,
+  y = 1:5
+) %>%
+  mutate(rangeland = "intact")
+
+value_fn <- value_iteration(land_grid, actions, r_states)
+
+policy <- extract_policy(value_fn, actions, land_grid, r_states)
 
