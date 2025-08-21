@@ -2,8 +2,8 @@
 title: "Proof of concept - Exploring human dimensions of market-based incentive design with reinfocement
   learning"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 date: "2025-08-07"
 ---
 
