@@ -9,7 +9,7 @@ date: "2025-08-07"
 
 ### Markov Decision Processes to predict ecosystem condition in Mongolia under different herding practices
 
-*Markov Decision Processes (MDPs) is a probabilistic framework that is computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impacts both actions and states.*
+*Markov Decision Processes (MDPs) is a probabilistic framework that computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impacts both actions and states.*
 
 
 #### Github repository
@@ -67,7 +67,7 @@ all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
 
 # Actions (stocking rates)
 actions <- c("<100", "200-400", "400-600", ">600")
-action_income <- c("<100" = 0.8, "200-400" = 2.0, "400-600" = 2.5, ">600" = 3.5)
+action_income <- c("<100" = 5, "200-400" = 5, "400-600" = 5, ">600" = 3)
 
 # Rangeland states
 r_states <- c("intact", "good", "poor", "degraded")
@@ -271,7 +271,7 @@ results <- simulate_adaptive(step=140)
 ```
 
 
-##### Results
+#### Results
 
 Ecosystem degradation rate over time
 ```{r data reshape abpes, echo=FALSE, warning=FALSE}
@@ -329,11 +329,15 @@ ggplot(policy_map, aes(x = x, y = y, fill = action)) +
 ### **II. Outcome based design **
 
 ##### Problem formulation
-Outcome based PES is an incentive design that rewards the outcome of land use actions, rather than just the actions (action based PES). In this case, the outcome is the 4 rangeland states that are the results of the chosen actions/goat herd size and climatic conditions. The rest of the model structure is very similar to action based PES, the only difference being that rewards from incentives (green numbers in diagram) are now associated with rangeland states. 
+Outcome based PES is an incentive design that rewards the outcome of land use actions, rather than just the actions (action based PES). In this case, the outcome is the 4 rangeland states that are the results of the chosen actions/goat herd size and climatic conditions. The rest of the model structure is very similar to action based PES, the only difference being that rewards from incentives (green numbers in diagram). Herders still benefit the cash rewards from the herd directly (pink numbers in diagram). 
 
 ```{r conceptual mode outpes, echo=FALSE,include=TRUE}
 knitr::include_graphics("outcome_based_pes_27Aug.jpg")
 ```
+
+##### Difference between action and outcome based PES
+
+Instead of rewards being the function of herd size alone (described under action based PES), here the incentives are based on rangeland states. For higher quality rangeland states herders are rewarded generously, whilst degraded state results in negative incentive (-1).  
 
 ```{r problem formulation outpes}
 land_grid_x <- 5
@@ -342,11 +346,12 @@ all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
 
 # Actions (stocking rates)
 actions <- c("<100", "200-400", "400-600", ">600")
-action_income <- c("<100" = 0.8, "200-400" = 2.0, "400-600" = 2.5, ">600" = 3.5)
+action_income <- c("<100" = 1, "200-400" = 2, "400-600" = 3, ">600" = 4)
 
 # Rangeland states
 r_states <- c("intact", "good", "poor", "degraded")
 r_code <- setNames(0:3, r_states)
+r_income<-c("intact"=4,"good"=3,"poor"=2,"degraded"=-1)
 
 # Weather probabilities
 weather_probs <- c("drought" = 0.3, "rainy" = 0.2, "normal" = 0.5)
@@ -358,9 +363,9 @@ draw_weather <- function() {
 }
 ```
 
-##### Transition matrix
-This is a long if then statement that defines how rangeland states relate to each action and weather condition combination. This needs to be coded up more efficiently for a hyper parameter grid search later on. But for now it is more of an illustration tool of how we perceive actions and climatic conditions impact the rangeland states. 
-```{r transition matrix outpes, echo=TRUE}
+
+
+```{r transition matrix outpes, echo=FALSE}
 transition_rangeland <- function(state, action, weather) {
   if (state == "degraded") return("degraded")  # terminal state
   
@@ -404,17 +409,10 @@ transition_rangeland <- function(state, action, weather) {
 
 
 ##### 2. Agents, actions and rewards
-
-##### Reward structure and policy
-Here we define how income from actions (rewards) are calculated. Rewards are a function of herd size (type of action), actions of the other agent. The specific strategy an agent employs to weigh the pros and cons of each reward is called policy, in this case this strategy is a "softmax" approach which is to maximise rewards with a moderate tau (temperature) of 1. Temperature settings for the policy can vary between 2 and 0. 
-
-###### *Lower tau → more greedy (e.g., 0.1)*
-###### *Higher tau → more exploratory (e.g., 2.0)*
-###### *tau = 1 is a moderate setting (default in many systems)*
-
-```{r compute return outpes}
+Here you will see that income from goat herd and incentives from PES are combined/added in total reward (r). 
+```{r compute return outpes, echo=TRUE}
 compute_reward <- function(action, same_cell, revisit,cell_condition) {
-  r <- action_income[action]
+  r <- action_income[action]+r_income[action]
   if (same_cell) r <- r * 0.7
   if (revisit) r <- r * 0.7
   
@@ -447,11 +445,9 @@ create_agent <- function(name, tau = 1.0) {
 }
 ```
 
-##### Action selection in space
+The transition matrix for outcome based PES is exactly the same as action based PES described above. Agents also employ the same strategy as action based PES. 
 
-Agent selects actions depending on where they are in the landscape in relation to other agents - this is to emulate the preference for non overlapping grazing practices employed by herders, which only exists as a silent/social agreement and are often breached by outsiders and desperate herders. Agents also have to consider the last time they were in a cell, because they are penalised if they return to the same cell immediately - this is an attempt to emulate ecosystem recovery from land use. If an agent hasn't been to a cell before and never tried an action before then they assume reward to be an average of 2.This is clearly a naive and overly optimistic approach. Future simulation should focus on testing the sensitivity of this parameter.
-
-```{r action selection outpes, echo=TRUE}
+```{r action selection outpes, echo=FALSE}
 select_action <- function(agent) {
   candidates <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1), action = actions)
   candidates$reward <- apply(candidates, 1, function(row) {
@@ -475,20 +471,8 @@ select_action <- function(agent) {
 }
 ```
 
-Alternative to using a constant of 2 as an average reward there is the option of using Bayesian smoothing based on prior knowledge through a small step like this: 
 
-```{r alternative - Bayesian smoothing outpes, eval=FALSE, include=FALSE}
-prior_mean <- 1.5
-prior_count <- 1
-numerator <- ifelse(!is.null(agent$reward_memory[[key]]), agent$reward_memory[[key]], 0) + prior_mean*prior_count
-denominator <- ifelse(!is.null(agent$memory_count[[key]]), agent$memory_count[[key]], 0) + prior_count
-avg <- numerator / denominator
-```
-
-##### Simulation
-
-Simulation creates an plain of cells that all start from intact condition. Then agents start to operate in them, iteratively choosing actions and optimising rewards as described above. 
-```{r simulations outpes, echo=TRUE}
+```{r simulations outpes, echo=FALSE}
 simulate_adaptive <- function(steps = 100) {
   land_grid <- all_cells %>% mutate(rangeland = "intact") #assumes that all cells start from an intact condition = which is naive
   agent1 <- create_agent("A1")
@@ -523,9 +507,7 @@ simulate_adaptive <- function(steps = 100) {
     
     land_grid[land_grid$x == a1$x & land_grid$y == a1$y, "rangeland"] <- new1
     land_grid[land_grid$x == a2$x & land_grid$y == a2$y, "rangeland"] <- new2
-    
-    #agent1 <- update_agent(agent1, a1, r1)
-    #agent2 <- update_agent(agent2, a2, r2)
+
     
     logs[[t]] <- list(
       step = t,
@@ -546,9 +528,10 @@ results <- simulate_adaptive(step=140)
 ```
 
 
-##### Results
+#### Results
 
-Ecosystem degradation rate over time
+Ecosystem degradation rate over time is similar to action based PES, albeit the shape is slightly different. 
+
 ```{r data reshape outpes, echo=FALSE, warning=FALSE}
 degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
                             mutate(step = .x$step,
