@@ -472,7 +472,7 @@ select_action <- function(agent) {
 ```
 
 
-```{r simulations outpes, echo=FALSE}
+```{r simulations outpes, echo=FALSE, include =FALSE}
 simulate_adaptive <- function(steps = 100) {
   land_grid <- all_cells %>% mutate(rangeland = "intact") #assumes that all cells start from an intact condition = which is naive
   agent1 <- create_agent("A1")
