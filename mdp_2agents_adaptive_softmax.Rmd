@@ -27,7 +27,9 @@ date: "2025-08-07"
 ======================================================================================================================
 ```{r setup, include=FALSE}
 .libPaths()
-.libPaths(new="C:/Data/RStudio")
+#.libPaths(new="C:/Data/RStudio")
+.libPaths(new="C:/rlibs/4.3.0/")
+
 library(jsonlite)
 library(highr)
 library(tidyverse)
@@ -583,3 +585,213 @@ ggplot(policy_map, aes(x = x, y = y, fill = action)) +
   labs(title = "Dominant Stocking Rate by Agent", x = "land_grid X", y = "land_grid Y")
 ```
 
+### **III. Null model - No PES **
+
+##### Problem formulation
+In contrast to action and outcome based PES described above, the "Null" model describes a base scenario, where there is no incentive. Agents still get cash rewards for direct benefits from herding, just like in real life. However, there is no additional reward from an incentive scheme (lack of green colored rewards in Figure 3). The significance of this model is to test additionality of incentives from action based and outcome based PES described in sections I and II. 
+
+```{r conceptual mode nopes, echo=FALSE,include=TRUE}
+knitr::include_graphics("No_incentive_for_additionality_27Aug.jpg")
+```
+
+```{r problem formulation nopes}
+land_grid_x <- 5
+land_grid_y <- 5
+all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
+
+# Actions (stocking rates)
+actions <- c("<100", "200-400", "400-600", ">600")
+action_income <- c("<100" = 1, "200-400" = 2, "400-600" = 3, ">600" = 4)
+
+# Rangeland states
+r_states <- c("intact", "good", "poor", "degraded")
+r_code <- setNames(0:3, r_states)
+
+# Weather probabilities
+weather_probs <- c("drought" = 0.3, "rainy" = 0.2, "normal" = 0.5)
+
+#Weather, transition and reward functions
+#---------------------------------------------------------------------------
+draw_weather <- function() {
+  sample(names(weather_probs), size=1, prob = weather_probs)
+}
+```
+
+
+No incentive model is set up very similarly to Action and Outcome based PES models, in that climate effects and the transition matrix are identical structure to the two incentive designs. 
+
+```{r transition matrix nopes, echo=FALSE}
+transition_rangeland <- function(state, action, weather) {
+  if (state == "degraded") return("degraded")  # terminal state
+  
+  probs <- NULL
+  
+  # Define probabilities based on action and weather
+  if (action == ">600") {
+    if (weather == "drought") {
+      probs <- c("degraded" = 0.9, "poor" = 0.1)
+    } else if (weather == "normal") {
+      probs <- c("degraded" = 0.7, "poor" = 0.3)
+    } else {  # rainy
+      probs <- c("poor" = 0.8, "good" = 0.2)
+    }
+    
+  } else if (action == "400-600") {
+    if (weather == "drought") {
+      probs <- c("poor" = 0.6, "good" = 0.4)
+    } else if (weather == "normal") {
+      probs <- c("good" = 0.7, "intact" = 0.3)
+    } else {
+      probs <- c("good" = 0.4, "intact" = 0.6)
+    }
+    
+  } else if (action == "200-400") {
+    if (weather == "drought") {
+      probs <- c("good" = 0.3, "intact" = 0.7)
+    } else if (weather == "normal") {
+      probs <- c("good" = 0.1, "intact" = 0.9)
+    } else {
+      probs <- c("intact" = 1.0)
+    }
+    
+  } else {  # action == "<100"
+    probs <- c("intact" = 1.0)
+  }
+  
+  return(sample(names(probs), 1, prob = probs))
+}
+```
+
+```{r compute return nopes, echo=TRUE}
+compute_reward <- function(action, same_cell, revisit,cell_condition) {
+  r <- action_income[action]
+  if (same_cell) r <- r * 0.7
+  if (revisit) r <- r * 0.7
+  
+  #A rangeland condition multiplier in reward (with the assumption that herders would benefit from a good quality pasture)
+  condition_modifier <- dplyr::case_when(
+    cell_condition == "intact"   ~ 1.0,
+    cell_condition == "good"     ~ 0.9,
+    cell_condition == "poor"     ~ 0.7,
+    cell_condition == "degraded" ~ 0.4,
+    TRUE ~ 1.0
+  )
+  
+  r <- r * condition_modifier
+  return(r)
+}
+
+softmax <- function(x, tau = 1.0) {
+  exp_x <- exp((x - max(x)) / tau)
+  exp_x / sum(exp_x)
+}
+create_agent <- function(name, tau = 1.0) {
+  list(
+    name = name,
+    location = sample_n(all_cells, 1),
+    last_cell = NA,
+    reward_memory = list(),
+    memory_count = list(),
+    tau = tau
+  )
+}
+```
+
+```{r action selection nopes, echo=FALSE}
+select_action <- function(agent) {
+  candidates <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1), action = actions)
+  candidates$reward <- apply(candidates, 1, function(row) {
+    key <- paste(row[["x"]], row[["y"]], row[["action"]], sep = "_")
+    if (!is.null(agent$reward_memory[[key]]) && agent$memory_count[[key]] > 0) {
+      avg <- agent$reward_memory[[key]] / agent$memory_count[[key]]
+    } else {
+      avg <- 2 
+    }
+   
+    # Safe revisit check
+    same_as_last_cell <- isTRUE(agent$last_cell["x"] == as.numeric(row[["x"]]) &&
+                                  agent$last_cell["y"] == as.numeric(row[["y"]]))
+    if (same_as_last_cell) avg <- avg * 0.7
+    return(avg)
+  })
+  
+  probs <- softmax(candidates$reward, agent$tau)
+  choice <- sample(1:nrow(candidates), 1, prob = probs)
+  return(candidates[choice, ])
+}
+```
+
+
+```{r simulations nopes, echo=FALSE, include =FALSE}
+simulate_adaptive <- function(steps = 100) {
+  land_grid <- all_cells %>% mutate(rangeland = "intact") #assumes that all cells start from an intact condition = which is naive
+  agent1 <- create_agent("A1")
+  agent2 <- create_agent("A2")
+  
+  logs <- list()
+  weather_trace <- character(steps)  # Store weather for debugging
+  
+  for (t in 1:steps) {
+    weather <- draw_weather()
+    weather_trace[t] <- weather
+    cat(sprintf("Step %d — Weather: %s\n", t, weather))
+    
+    a1 <- select_action(agent1)
+    a2 <- select_action(agent2)
+    
+    same_cell <- a1$x == a2$x && a1$y == a2$y
+    
+    a1_state <- land_grid %>% filter(x == a1$x, y == a1$y) %>% pull(rangeland)
+    a2_state <- land_grid %>% filter(x == a2$x, y == a2$y) %>% pull(rangeland)
+    
+    a1_revisit <- isTRUE(agent1$last_cell["x"] == a1$x &&
+                           agent1$last_cell["y"] == a1$y)
+    a2_revisit <- isTRUE(agent2$last_cell["x"] == a2$x &&
+                           agent2$last_cell["y"] == a2$y)
+    
+    r1 <- compute_reward(a1$action, same_cell, a1_revisit, a1_state)
+    r2 <- compute_reward(a2$action, same_cell, a2_revisit, a2_state)
+    
+    new1 <- transition_rangeland(a1_state, a1$action, weather)
+    new2 <- transition_rangeland(a2_state, a2$action, weather)
+    
+    land_grid[land_grid$x == a1$x & land_grid$y == a1$y, "rangeland"] <- new1
+    land_grid[land_grid$x == a2$x & land_grid$y == a2$y, "rangeland"] <- new2
+
+    
+    logs[[t]] <- list(
+      step = t,
+      weather = weather,
+      land_grid = land_grid,
+      a1 = a1,
+      a2 = a2
+    )
+  }
+  
+  return(list(logs = logs, weather_history = weather_trace))
+}
+
+```
+
+```{r simulation result nopes, include=FALSE}
+results <- simulate_adaptive(step=140)
+```
+
+
+#### Results
+
+Ecosystem degradation rate is much faster when there is no incentive scheme. Based on this preliminary simulation result, incentives slow down ecosystem degradation rate by 2-3 times compared to no incentive scenario. 
+
+```{r data reshape nopes, echo=FALSE, warning=FALSE}
+degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
+                            mutate(step = .x$step,
+                                   degraded = rangeland == "degraded"))
+
+degradation_summary <- degradation_df %>%
+  group_by(step) %>%
+  summarise(pct_degraded = mean(degraded) * 100)
+
+ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
+  geom_line(size = 1.2, color = "darkred") +
+  labs(title = "Degradation Over Time", y = "% Degraded", x = "Step")
+```
