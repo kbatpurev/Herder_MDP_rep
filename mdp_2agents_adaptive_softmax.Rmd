@@ -27,8 +27,8 @@ date: "2025-08-07"
 ======================================================================================================================
 ```{r setup, include=FALSE}
 .libPaths()
-#.libPaths(new="C:/Data/RStudio")
-.libPaths(new="C:/rlibs/4.3.0/")
+.libPaths(new="C:/Data/RStudio")
+#libPaths(new="C:/rlibs/4.3.0/")
 
 library(jsonlite)
 library(highr)
@@ -269,7 +269,7 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result abpes, include=FALSE}
-results <- simulate_adaptive(step=140)
+results <- simulate_adaptive(step=1400)
 ```
 
 
@@ -287,7 +287,7 @@ degradation_summary <- degradation_df %>%
 
 ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
   geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time", y = "% Degraded", x = "Step")
+  labs(title = "Degradation Over Time - Action based PES", y = "% Degraded", x = "Step")
 ```
 
 
@@ -324,7 +324,7 @@ ggplot(policy_map, aes(x = x, y = y, fill = action)) +
   geom_tile(color = "white") +
   facet_wrap(~agent) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Dominant Stocking Rate by Agent", x = "land_grid X", y = "land_grid Y")
+  labs(title = "Dominant Stocking Rate by Agents - Action based PES", x = "land_grid X", y = "land_grid Y")
 ```
 
 
@@ -526,13 +526,13 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result outpes, include=FALSE}
-results <- simulate_adaptive(step=140)
+results <- simulate_adaptive(step=1400)
 ```
 
 
 #### Results
 
-Ecosystem degradation rate over time is similar to action based PES, albeit the shape is slightly different. 
+Ecosystem degradation rate is similar to Action based PES. Landscape reaches complete degradation in ~260 years. 
 
 ```{r data reshape outpes, echo=FALSE, warning=FALSE}
 degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
@@ -545,7 +545,7 @@ degradation_summary <- degradation_df %>%
 
 ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
   geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time", y = "% Degraded", x = "Step")
+  labs(title = "Degradation Over Time - Outcome based PES", y = "% Degraded", x = "Step")
 ```
 
 
@@ -582,7 +582,7 @@ ggplot(policy_map, aes(x = x, y = y, fill = action)) +
   geom_tile(color = "white") +
   facet_wrap(~agent) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Dominant Stocking Rate by Agent", x = "land_grid X", y = "land_grid Y")
+  labs(title = "Dominant Stocking Rate by Agents - Outcome based PES", x = "land_grid X", y = "land_grid Y")
 ```
 
 ### **III. Null model - No PES **
@@ -593,6 +593,8 @@ In contrast to action and outcome based PES described above, the "Null" model de
 ```{r conceptual mode nopes, echo=FALSE,include=TRUE}
 knitr::include_graphics("No_incentive_for_additionality_27Aug.jpg")
 ```
+
+No incentive model is set up very similarly to Action and Outcome based PES models, apart from the reward structure. The only rewards that herders get are from goat rearing described in action_income string.  
 
 ```{r problem formulation nopes}
 land_grid_x <- 5
@@ -617,10 +619,46 @@ draw_weather <- function() {
 }
 ```
 
+The total financial income for a herder is described through the compute_reward function below through the action_income string. 
 
-No incentive model is set up very similarly to Action and Outcome based PES models, in that climate effects and the transition matrix are identical structure to the two incentive designs. 
+```{r compute return nopes, echo=TRUE}
+compute_reward <- function(action, same_cell, revisit,cell_condition) {
+  r <- action_income[action]
+  if (same_cell) r <- r * 0.7
+  if (revisit) r <- r * 0.7
+  
+  #A rangeland condition multiplier in reward (with the assumption that herders would benefit from a good quality pasture)
+  condition_modifier <- dplyr::case_when(
+    cell_condition == "intact"   ~ 1.0,
+    cell_condition == "good"     ~ 0.9,
+    cell_condition == "poor"     ~ 0.7,
+    cell_condition == "degraded" ~ 0.4,
+    TRUE ~ 1.0
+  )
+  
+  r <- r * condition_modifier
+  return(r)
+}
 
-```{r transition matrix nopes, echo=FALSE}
+softmax <- function(x, tau = 1.0) {
+  exp_x <- exp((x - max(x)) / tau)
+  exp_x / sum(exp_x)
+}
+create_agent <- function(name, tau = 1.0) {
+  list(
+    name = name,
+    location = sample_n(all_cells, 1),
+    last_cell = NA,
+    reward_memory = list(),
+    memory_count = list(),
+    tau = tau
+  )
+}
+```
+
+Otherwise,climate effects and the transition matrix in No PES model are identical to the action and outcome based incentive designs. Action selection and the spatial coordination strategies are also identical to action and outcome based schemes. 
+
+```{r transition matrix nopes, echo=FALSE, include=FALSE}
 transition_rangeland <- function(state, action, weather) {
   if (state == "degraded") return("degraded")  # terminal state
   
@@ -662,42 +700,9 @@ transition_rangeland <- function(state, action, weather) {
 }
 ```
 
-```{r compute return nopes, echo=TRUE}
-compute_reward <- function(action, same_cell, revisit,cell_condition) {
-  r <- action_income[action]
-  if (same_cell) r <- r * 0.7
-  if (revisit) r <- r * 0.7
-  
-  #A rangeland condition multiplier in reward (with the assumption that herders would benefit from a good quality pasture)
-  condition_modifier <- dplyr::case_when(
-    cell_condition == "intact"   ~ 1.0,
-    cell_condition == "good"     ~ 0.9,
-    cell_condition == "poor"     ~ 0.7,
-    cell_condition == "degraded" ~ 0.4,
-    TRUE ~ 1.0
-  )
-  
-  r <- r * condition_modifier
-  return(r)
-}
 
-softmax <- function(x, tau = 1.0) {
-  exp_x <- exp((x - max(x)) / tau)
-  exp_x / sum(exp_x)
-}
-create_agent <- function(name, tau = 1.0) {
-  list(
-    name = name,
-    location = sample_n(all_cells, 1),
-    last_cell = NA,
-    reward_memory = list(),
-    memory_count = list(),
-    tau = tau
-  )
-}
-```
 
-```{r action selection nopes, echo=FALSE}
+```{r action selection nopes, echo=FALSE, include=FALSE}
 select_action <- function(agent) {
   candidates <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1), action = actions)
   candidates$reward <- apply(candidates, 1, function(row) {
@@ -720,6 +725,7 @@ select_action <- function(agent) {
   return(candidates[choice, ])
 }
 ```
+
 
 
 ```{r simulations nopes, echo=FALSE, include =FALSE}
@@ -774,13 +780,13 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result nopes, include=FALSE}
-results <- simulate_adaptive(step=140)
+results <- simulate_adaptive(step=1400)
 ```
 
 
 #### Results
 
-Ecosystem degradation rate is much faster when there is no incentive scheme. Based on this preliminary simulation result, incentives slow down ecosystem degradation rate by 2-3 times compared to no incentive scenario. 
+Ecosystem degradation rate seems slightly faster than action and outcome based PES. 
 
 ```{r data reshape nopes, echo=FALSE, warning=FALSE}
 degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
@@ -793,5 +799,40 @@ degradation_summary <- degradation_df %>%
 
 ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
   geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time", y = "% Degraded", x = "Step")
+  labs(title = "Degradation Over Time - No PES", y = "% Degraded", x = "Step")
+```
+
+
+```{r data reshape policy mix nopes, echo=FALSE, warning=FALSE}
+action_df <- map2_dfr(results$logs, results$weather_history, function(res, weather) {
+  tibble(
+    step = res$step,
+    weather = weather,
+    x1 = res$a1$x,
+    y1 = res$a1$y,
+    a1 = res$a1$action,
+    x2 = res$a2$x,
+    y2 = res$a2$y,
+    a2 = res$a2$action
+  )
+})
+action_long <- action_df %>%
+  pivot_longer(
+    cols = c(x1, y1, a1, x2, y2, a2),
+    names_to = c(".value", "agent"),
+    names_pattern = "([a-z]+)([12])"
+  ) %>%
+  mutate(agent = paste0("A", agent))
+action_long <- action_long %>% rename(action = a)
+
+policy_map <- action_long %>%
+  group_by(agent, x, y) %>%
+  count(action) %>%
+  slice_max(n, n = 1, with_ties = FALSE)
+
+ggplot(policy_map, aes(x = x, y = y, fill = action)) +
+  geom_tile(color = "white") +
+  facet_wrap(~agent) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Dominant Stocking Rate by Agents - No PES", x = "land_grid X", y = "land_grid Y")
 ```
