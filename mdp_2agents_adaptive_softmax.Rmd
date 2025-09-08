@@ -337,7 +337,6 @@ ggplot() +
 
 Policy mix by cell by each agent
 
-The dominant stocking rate seem slightly different between the two agents. This is totally random, but partly could be because the There is still a small chance that these will and  is **below 400** goats (>13 cells out of 25) for agent 1 
 ```{r data reshape policy mix abpes, echo=FALSE, warning=FALSE}
 action_df_all <- map2_dfr(
   results_list, seq_along(results_list),
@@ -417,7 +416,7 @@ ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
     size = 3.8, lineheight = 1.05, color = "gray20"
   ) +
   labs(
-    title = "Dominant Stocking Rate by Agents under Different Weather Regimes",
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
     x = "Grid X", y = "Grid Y"
   ) +
   theme_minimal(base_size = 12) +
@@ -694,7 +693,6 @@ ggplot() +
 
 Policy mix by cell by each agent
 
-When PES scheme incentive is outcome (rangeland condition) based, agents tend to employ a higher stocking rate compared to action based PES (herd size). Dominant stocking rate is **above 400** for majority of the cells (>14 out of 25).  
 ```{r data reshape policy mix outpes, echo=FALSE, warning=FALSE}
 action_df_all <- map2_dfr(
   results_list, seq_along(results_list),
@@ -774,7 +772,7 @@ ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
     size = 3.8, lineheight = 1.05, color = "gray20"
   ) +
   labs(
-    title = "Dominant Stocking Rate by Agents under Different Weather Regimes",
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
     x = "Grid X", y = "Grid Y"
   ) +
   theme_minimal(base_size = 12) +
@@ -1126,7 +1124,7 @@ ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
     size = 3.8, lineheight = 1.05, color = "gray20"
   ) +
   labs(
-    title = "Dominant Stocking Rate by Agents under Different Weather Regimes",
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
     x = "Grid X", y = "Grid Y"
   ) +
   theme_minimal(base_size = 12) +
