@@ -1,0 +1,429 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+%
+\documentclass[
+]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage{color}
+\usepackage{fancyvrb}
+\newcommand{\VerbBar}{|}
+\newcommand{\VERB}{\Verb[commandchars=\\\{\}]}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\}}
+% Add ',fontsize=\small' for more characters per line
+\usepackage{framed}
+\definecolor{shadecolor}{RGB}{248,248,248}
+\newenvironment{Shaded}{\begin{snugshade}}{\end{snugshade}}
+\newcommand{\AlertTok}[1]{\textcolor[rgb]{0.94,0.16,0.16}{#1}}
+\newcommand{\AnnotationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\AttributeTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{#1}}
+\newcommand{\BaseNTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\BuiltInTok}[1]{#1}
+\newcommand{\CharTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\CommentTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\CommentVarTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ConstantTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{#1}}
+\newcommand{\ControlFlowTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\DataTypeTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{#1}}
+\newcommand{\DecValTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\DocumentationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ErrorTok}[1]{\textcolor[rgb]{0.64,0.00,0.00}{\textbf{#1}}}
+\newcommand{\ExtensionTok}[1]{#1}
+\newcommand{\FloatTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\FunctionTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\ImportTok}[1]{#1}
+\newcommand{\InformationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\KeywordTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\NormalTok}[1]{#1}
+\newcommand{\OperatorTok}[1]{\textcolor[rgb]{0.81,0.36,0.00}{\textbf{#1}}}
+\newcommand{\OtherTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{#1}}
+\newcommand{\PreprocessorTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\RegionMarkerTok}[1]{#1}
+\newcommand{\SpecialCharTok}[1]{\textcolor[rgb]{0.81,0.36,0.00}{\textbf{#1}}}
+\newcommand{\SpecialStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\StringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\VariableTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\WarningTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\usepackage{graphicx}
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>\textheight\textheight\else\Gin@nat@height\fi}
+\makeatother
+% Scale images if necessary, so that they will not overflow the page
+% margins by default, and it is still possible to overwrite the defaults
+% using explicit options in \includegraphics[width, height, ...]{}
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+% Set default figure placement to htbp
+\makeatletter
+\def\fps@figure{htbp}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{wrapfig}
+\usepackage{float}
+\usepackage{colortbl}
+\usepackage{pdflscape}
+\usepackage{tabu}
+\usepackage{threeparttable}
+\usepackage{threeparttablex}
+\usepackage[normalem]{ulem}
+\usepackage{makecell}
+\usepackage{xcolor}
+\ifLuaTeX
+  \usepackage{selnolig}  % disable illegal ligatures
+\fi
+\IfFileExists{bookmark.sty}{\usepackage{bookmark}}{\usepackage{hyperref}}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  pdftitle={Exploring human dimensions of market-based incentive design with reinfocement learning},
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\title{Exploring human dimensions of market-based incentive design with
+reinfocement learning}
+\author{}
+\date{\vspace{-2.5em}2025-08-07}
+
+\begin{document}
+\maketitle
+
+\hypertarget{markov-decision-processes-to-predict-ecosystem-condition-in-mongolia-under-different-herding-practices}{%
+\subsubsection{Markov Decision Processes to predict ecosystem condition
+in Mongolia under different herding
+practices}\label{markov-decision-processes-to-predict-ecosystem-condition-in-mongolia-under-different-herding-practices}}
+
+\emph{Markov Decision Processes (MDPs) is a probabilistic framework that
+is computes the optimal course of action in a repeated-decisions
+scenario through iterative agent based learning. It belongs to a family
+of machine learning algorithms called Reinforcement Learning. Here we
+apply MDPs to explore how herder behaviour and practices affect
+ecosystem condition in Mongolian rangelands. We approach this problem as
+a spatially explicit multi-agent reinforcement learning problem (MARL)
+with herders as agents, goat rearing as actions, and environmental
+conditions as states and climate as a stochastic variable that impact
+both actions and states.}
+
+\hypertarget{github-repository}{%
+\paragraph{Github repository}\label{github-repository}}
+
+\url{https://github.com/kbatpurev/Herder_MDP_rep.git}
+
+===============================================================================================
+
+\hypertarget{model-1---action-based-design}{%
+\paragraph{Model 1 - Action based
+design}\label{model-1---action-based-design}}
+
+(V1. Toy version with two agents with softmax policy)
+
+\hypertarget{problem-formulation}{%
+\subparagraph{\texorpdfstring{\textbf{1. Problem
+formulation}}{1. Problem formulation}}\label{problem-formulation}}
+
+\hypertarget{fundamentals}{%
+\subparagraph{Fundamentals}\label{fundamentals}}
+
+Here we create a 5 x 5 raster where two agents herd goats in the same
+space. We define 4 different actions: choosing to have herd sizes a)less
+than 100,b) 200-400, c)400-600 and d)600 and above. Each of these
+actions bring rewards or income to varying degrees. The rangeland can be
+in one of four states: intact, good, poor or degraded. And the weather
+conditions are drawn from a probability distribution where a given year
+has 50\% of being in average condition, 30\% chance of being in drought
+condition and 20\% chance of being rainy (higher than average rainfall).
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{land\_grid\_x }\OtherTok{\textless{}{-}} \DecValTok{5}
+\NormalTok{land\_grid\_y }\OtherTok{\textless{}{-}} \DecValTok{5}
+\NormalTok{all\_cells }\OtherTok{\textless{}{-}} \FunctionTok{expand.grid}\NormalTok{(}\AttributeTok{x =} \DecValTok{0}\SpecialCharTok{:}\NormalTok{(land\_grid\_x }\SpecialCharTok{{-}} \DecValTok{1}\NormalTok{), }\AttributeTok{y =} \DecValTok{0}\SpecialCharTok{:}\NormalTok{(land\_grid\_y }\SpecialCharTok{{-}} \DecValTok{1}\NormalTok{))}
+
+\CommentTok{\# Actions (stocking rates)}
+\NormalTok{actions }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"\textless{}100"}\NormalTok{, }\StringTok{"200{-}400"}\NormalTok{, }\StringTok{"400{-}600"}\NormalTok{, }\StringTok{"\textgreater{}600"}\NormalTok{)}
+\NormalTok{action\_income }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"\textless{}100"} \OtherTok{=} \FloatTok{0.8}\NormalTok{, }\StringTok{"200{-}400"} \OtherTok{=} \FloatTok{2.0}\NormalTok{, }\StringTok{"400{-}600"} \OtherTok{=} \FloatTok{2.5}\NormalTok{, }\StringTok{"\textgreater{}600"} \OtherTok{=} \FloatTok{3.5}\NormalTok{)}
+
+\CommentTok{\# Rangeland states}
+\NormalTok{r\_states }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"intact"}\NormalTok{, }\StringTok{"good"}\NormalTok{, }\StringTok{"poor"}\NormalTok{, }\StringTok{"degraded"}\NormalTok{)}
+\NormalTok{r\_code }\OtherTok{\textless{}{-}} \FunctionTok{setNames}\NormalTok{(}\DecValTok{0}\SpecialCharTok{:}\DecValTok{3}\NormalTok{, r\_states)}
+
+\CommentTok{\# Weather probabilities}
+\NormalTok{weather\_probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"drought"} \OtherTok{=} \FloatTok{0.3}\NormalTok{, }\StringTok{"rainy"} \OtherTok{=} \FloatTok{0.2}\NormalTok{, }\StringTok{"normal"} \OtherTok{=} \FloatTok{0.5}\NormalTok{)}
+
+\CommentTok{\#Weather, transition and reward functions}
+\CommentTok{\#{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}{-}}
+\NormalTok{draw\_weather }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{() \{}
+  \FunctionTok{sample}\NormalTok{(}\FunctionTok{names}\NormalTok{(weather\_probs), }\AttributeTok{size=}\DecValTok{1}\NormalTok{, }\AttributeTok{prob =}\NormalTok{ weather\_probs)}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{transition-matrix}{%
+\subparagraph{Transition matrix}\label{transition-matrix}}
+
+This is a long if then statement that defines how rangeland states
+relate to each action and weather condition combination. This needs to
+be coded up more efficiently for a hyper parameter grid search later on.
+But for now it is more of an illustration tool of how we perceive
+actions and climatic conditions impact the rangeland states.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{transition\_rangeland }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(state, action, weather) \{}
+  \ControlFlowTok{if}\NormalTok{ (state }\SpecialCharTok{==} \StringTok{"degraded"}\NormalTok{) }\FunctionTok{return}\NormalTok{(}\StringTok{"degraded"}\NormalTok{)  }\CommentTok{\# terminal state}
+  
+\NormalTok{  probs }\OtherTok{\textless{}{-}} \ConstantTok{NULL}
+  
+  \CommentTok{\# Define probabilities based on action and weather}
+  \ControlFlowTok{if}\NormalTok{ (action }\SpecialCharTok{==} \StringTok{"\textgreater{}600"}\NormalTok{) \{}
+    \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"drought"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"degraded"} \OtherTok{=} \FloatTok{0.9}\NormalTok{, }\StringTok{"poor"} \OtherTok{=} \FloatTok{0.1}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else} \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"normal"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"degraded"} \OtherTok{=} \FloatTok{0.7}\NormalTok{, }\StringTok{"poor"} \OtherTok{=} \FloatTok{0.3}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{  }\CommentTok{\# rainy}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"poor"} \OtherTok{=} \FloatTok{0.8}\NormalTok{, }\StringTok{"good"} \OtherTok{=} \FloatTok{0.2}\NormalTok{)}
+\NormalTok{    \}}
+    
+\NormalTok{  \} }\ControlFlowTok{else} \ControlFlowTok{if}\NormalTok{ (action }\SpecialCharTok{==} \StringTok{"400{-}600"}\NormalTok{) \{}
+    \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"drought"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"poor"} \OtherTok{=} \FloatTok{0.6}\NormalTok{, }\StringTok{"good"} \OtherTok{=} \FloatTok{0.4}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else} \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"normal"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"good"} \OtherTok{=} \FloatTok{0.7}\NormalTok{, }\StringTok{"intact"} \OtherTok{=} \FloatTok{0.3}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"good"} \OtherTok{=} \FloatTok{0.4}\NormalTok{, }\StringTok{"intact"} \OtherTok{=} \FloatTok{0.6}\NormalTok{)}
+\NormalTok{    \}}
+    
+\NormalTok{  \} }\ControlFlowTok{else} \ControlFlowTok{if}\NormalTok{ (action }\SpecialCharTok{==} \StringTok{"200{-}400"}\NormalTok{) \{}
+    \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"drought"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"good"} \OtherTok{=} \FloatTok{0.3}\NormalTok{, }\StringTok{"intact"} \OtherTok{=} \FloatTok{0.7}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else} \ControlFlowTok{if}\NormalTok{ (weather }\SpecialCharTok{==} \StringTok{"normal"}\NormalTok{) \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"good"} \OtherTok{=} \FloatTok{0.1}\NormalTok{, }\StringTok{"intact"} \OtherTok{=} \FloatTok{0.9}\NormalTok{)}
+\NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
+\NormalTok{      probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"intact"} \OtherTok{=} \FloatTok{1.0}\NormalTok{)}
+\NormalTok{    \}}
+    
+\NormalTok{  \} }\ControlFlowTok{else}\NormalTok{ \{  }\CommentTok{\# action == "\textless{}100"}
+\NormalTok{    probs }\OtherTok{\textless{}{-}} \FunctionTok{c}\NormalTok{(}\StringTok{"intact"} \OtherTok{=} \FloatTok{1.0}\NormalTok{)}
+\NormalTok{  \}}
+  
+  \FunctionTok{return}\NormalTok{(}\FunctionTok{sample}\NormalTok{(}\FunctionTok{names}\NormalTok{(probs), }\DecValTok{1}\NormalTok{, }\AttributeTok{prob =}\NormalTok{ probs))}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{agents-actions-and-rewards}{%
+\subparagraph{\texorpdfstring{\textbf{2. Agents, actions and
+rewards}}{2. Agents, actions and rewards}}\label{agents-actions-and-rewards}}
+
+\hypertarget{reward-structure-and-policy}{%
+\subparagraph{Reward structure and
+policy}\label{reward-structure-and-policy}}
+
+Here we define how income from actions (rewards) are calculated. Rewards
+are a function of herd size (type of action), actions of the other
+agent. The specific strategy an agent employs to weigh the pros and cons
+of each reward is called policy, in this case this strategy is a
+``softmax'' approach which is to maximise rewards with a moderate tau
+(temperature) of 1. Temperature settings for the policy can vary between
+2 and 0.
+
+\emph{Lower tau → more greedy (e.g., 0.1)}
+
+\emph{Higher tau → more exploratory (e.g., 2.0)}
+
+\emph{tau = 1 is a moderate setting (default in many systems)}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{compute\_reward }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(action, same\_cell, revisit,cell\_condition) \{}
+\NormalTok{  r }\OtherTok{\textless{}{-}}\NormalTok{ action\_income[action]}
+  \ControlFlowTok{if}\NormalTok{ (same\_cell) r }\OtherTok{\textless{}{-}}\NormalTok{ r }\SpecialCharTok{*} \FloatTok{0.7}
+  \ControlFlowTok{if}\NormalTok{ (revisit) r }\OtherTok{\textless{}{-}}\NormalTok{ r }\SpecialCharTok{*} \FloatTok{0.7}
+  
+  \CommentTok{\#A rangeland condition multiplier in reward (with the assumption that herders would benefit from a good quality pasture)}
+\NormalTok{  condition\_modifier }\OtherTok{\textless{}{-}}\NormalTok{ dplyr}\SpecialCharTok{::}\FunctionTok{case\_when}\NormalTok{(}
+\NormalTok{    cell\_condition }\SpecialCharTok{==} \StringTok{"intact"}   \SpecialCharTok{\textasciitilde{}} \FloatTok{1.0}\NormalTok{,}
+\NormalTok{    cell\_condition }\SpecialCharTok{==} \StringTok{"good"}     \SpecialCharTok{\textasciitilde{}} \FloatTok{0.9}\NormalTok{,}
+\NormalTok{    cell\_condition }\SpecialCharTok{==} \StringTok{"poor"}     \SpecialCharTok{\textasciitilde{}} \FloatTok{0.7}\NormalTok{,}
+\NormalTok{    cell\_condition }\SpecialCharTok{==} \StringTok{"degraded"} \SpecialCharTok{\textasciitilde{}} \FloatTok{0.4}\NormalTok{,}
+    \ConstantTok{TRUE} \SpecialCharTok{\textasciitilde{}} \FloatTok{1.0}
+\NormalTok{  )}
+  
+\NormalTok{  r }\OtherTok{\textless{}{-}}\NormalTok{ r }\SpecialCharTok{*}\NormalTok{ condition\_modifier}
+  \FunctionTok{return}\NormalTok{(r)}
+\NormalTok{\}}
+
+\NormalTok{softmax }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(x, }\AttributeTok{tau =} \FloatTok{1.0}\NormalTok{) \{}
+\NormalTok{  exp\_x }\OtherTok{\textless{}{-}} \FunctionTok{exp}\NormalTok{((x }\SpecialCharTok{{-}} \FunctionTok{max}\NormalTok{(x)) }\SpecialCharTok{/}\NormalTok{ tau)}
+\NormalTok{  exp\_x }\SpecialCharTok{/} \FunctionTok{sum}\NormalTok{(exp\_x)}
+\NormalTok{\}}
+\NormalTok{create\_agent }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(name, }\AttributeTok{tau =} \FloatTok{1.0}\NormalTok{) \{}
+  \FunctionTok{list}\NormalTok{(}
+    \AttributeTok{name =}\NormalTok{ name,}
+    \AttributeTok{location =} \FunctionTok{sample\_n}\NormalTok{(all\_cells, }\DecValTok{1}\NormalTok{),}
+    \AttributeTok{last\_cell =} \ConstantTok{NA}\NormalTok{,}
+    \AttributeTok{reward\_memory =} \FunctionTok{list}\NormalTok{(),}
+    \AttributeTok{memory\_count =} \FunctionTok{list}\NormalTok{(),}
+    \AttributeTok{tau =}\NormalTok{ tau}
+\NormalTok{  )}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{action-selection-in-space}{%
+\subparagraph{Action selection in
+space}\label{action-selection-in-space}}
+
+Agent selects actions depending on where they are in the landscape in
+relation to other agents - this is to emulate the preference for non
+overlapping grazing practices employed by herders, which only exists as
+a silent/social agreement and are often breached by outsiders and
+desperate herders. Agents also have to consider the last time they were
+in a cell, because they are penalised if they return to the same cell
+immediately - this is an attempt to emulate ecosystem recovery from land
+use. If an agent hasn't been to a cell before and never tried an action
+before then they assume reward to be an average of 2.This is clearly a
+naive and overly optimistic approach. Future simulation should focus on
+testing the sensitivity of this parameter.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{select\_action }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(agent) \{}
+\NormalTok{  candidates }\OtherTok{\textless{}{-}} \FunctionTok{expand.grid}\NormalTok{(}\AttributeTok{x =} \DecValTok{0}\SpecialCharTok{:}\NormalTok{(land\_grid\_x }\SpecialCharTok{{-}} \DecValTok{1}\NormalTok{), }\AttributeTok{y =} \DecValTok{0}\SpecialCharTok{:}\NormalTok{(land\_grid\_y }\SpecialCharTok{{-}} \DecValTok{1}\NormalTok{), }\AttributeTok{action =}\NormalTok{ actions)}
+\NormalTok{  candidates}\SpecialCharTok{$}\NormalTok{reward }\OtherTok{\textless{}{-}} \FunctionTok{apply}\NormalTok{(candidates, }\DecValTok{1}\NormalTok{, }\ControlFlowTok{function}\NormalTok{(row) \{}
+\NormalTok{    key }\OtherTok{\textless{}{-}} \FunctionTok{paste}\NormalTok{(row[[}\StringTok{"x"}\NormalTok{]], row[[}\StringTok{"y"}\NormalTok{]], row[[}\StringTok{"action"}\NormalTok{]], }\AttributeTok{sep =} \StringTok{"\_"}\NormalTok{)}
+    \ControlFlowTok{if}\NormalTok{ (}\SpecialCharTok{!}\FunctionTok{is.null}\NormalTok{(agent}\SpecialCharTok{$}\NormalTok{reward\_memory[[key]]) }\SpecialCharTok{\&\&}\NormalTok{ agent}\SpecialCharTok{$}\NormalTok{memory\_count[[key]] }\SpecialCharTok{\textgreater{}} \DecValTok{0}\NormalTok{) \{}
+\NormalTok{      avg }\OtherTok{\textless{}{-}}\NormalTok{ agent}\SpecialCharTok{$}\NormalTok{reward\_memory[[key]] }\SpecialCharTok{/}\NormalTok{ agent}\SpecialCharTok{$}\NormalTok{memory\_count[[key]]}
+\NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
+\NormalTok{      avg }\OtherTok{\textless{}{-}} \DecValTok{2} 
+\NormalTok{    \}}
+   
+    \CommentTok{\# Safe revisit check}
+\NormalTok{    same\_as\_last\_cell }\OtherTok{\textless{}{-}} \FunctionTok{isTRUE}\NormalTok{(agent}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"x"}\NormalTok{] }\SpecialCharTok{==} \FunctionTok{as.numeric}\NormalTok{(row[[}\StringTok{"x"}\NormalTok{]]) }\SpecialCharTok{\&\&}
+\NormalTok{                                  agent}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"y"}\NormalTok{] }\SpecialCharTok{==} \FunctionTok{as.numeric}\NormalTok{(row[[}\StringTok{"y"}\NormalTok{]]))}
+    \ControlFlowTok{if}\NormalTok{ (same\_as\_last\_cell) avg }\OtherTok{\textless{}{-}}\NormalTok{ avg }\SpecialCharTok{*} \FloatTok{0.7}
+    \FunctionTok{return}\NormalTok{(avg)}
+\NormalTok{  \})}
+  
+\NormalTok{  probs }\OtherTok{\textless{}{-}} \FunctionTok{softmax}\NormalTok{(candidates}\SpecialCharTok{$}\NormalTok{reward, agent}\SpecialCharTok{$}\NormalTok{tau)}
+\NormalTok{  choice }\OtherTok{\textless{}{-}} \FunctionTok{sample}\NormalTok{(}\DecValTok{1}\SpecialCharTok{:}\FunctionTok{nrow}\NormalTok{(candidates), }\DecValTok{1}\NormalTok{, }\AttributeTok{prob =}\NormalTok{ probs)}
+  \FunctionTok{return}\NormalTok{(candidates[choice, ])}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+Alternative to using a constant of 2 as an average reward there is the
+option of using Bayesian smoothing based on prior knowledge through a
+small step like this:
+
+\hypertarget{simulation}{%
+\subparagraph{Simulation}\label{simulation}}
+
+Simulation creates an plain of cells that all start from intact
+condition. Then agents start to operate in them, iteratively choosing
+actions and optimising rewards as described above.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{simulate\_adaptive }\OtherTok{\textless{}{-}} \ControlFlowTok{function}\NormalTok{(}\AttributeTok{steps =} \DecValTok{100}\NormalTok{) \{}
+\NormalTok{  land\_grid }\OtherTok{\textless{}{-}}\NormalTok{ all\_cells }\SpecialCharTok{\%\textgreater{}\%} \FunctionTok{mutate}\NormalTok{(}\AttributeTok{rangeland =} \StringTok{"intact"}\NormalTok{) }\CommentTok{\#assumes that all cells start from an intact condition = which is naive}
+\NormalTok{  agent1 }\OtherTok{\textless{}{-}} \FunctionTok{create\_agent}\NormalTok{(}\StringTok{"A1"}\NormalTok{)}
+\NormalTok{  agent2 }\OtherTok{\textless{}{-}} \FunctionTok{create\_agent}\NormalTok{(}\StringTok{"A2"}\NormalTok{)}
+  
+\NormalTok{  logs }\OtherTok{\textless{}{-}} \FunctionTok{list}\NormalTok{()}
+\NormalTok{  weather\_trace }\OtherTok{\textless{}{-}} \FunctionTok{character}\NormalTok{(steps)  }\CommentTok{\# Store weather for debugging}
+  
+  \ControlFlowTok{for}\NormalTok{ (t }\ControlFlowTok{in} \DecValTok{1}\SpecialCharTok{:}\NormalTok{steps) \{}
+\NormalTok{    weather }\OtherTok{\textless{}{-}} \FunctionTok{draw\_weather}\NormalTok{()}
+\NormalTok{    weather\_trace[t] }\OtherTok{\textless{}{-}}\NormalTok{ weather}
+    \FunctionTok{cat}\NormalTok{(}\FunctionTok{sprintf}\NormalTok{(}\StringTok{"Step \%d — Weather: \%s}\SpecialCharTok{\textbackslash{}n}\StringTok{"}\NormalTok{, t, weather))}
+    
+\NormalTok{    a1 }\OtherTok{\textless{}{-}} \FunctionTok{select\_action}\NormalTok{(agent1)}
+\NormalTok{    a2 }\OtherTok{\textless{}{-}} \FunctionTok{select\_action}\NormalTok{(agent2)}
+    
+\NormalTok{    same\_cell }\OtherTok{\textless{}{-}}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{\&\&}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{y }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{y}
+    
+\NormalTok{    a1\_state }\OtherTok{\textless{}{-}}\NormalTok{ land\_grid }\SpecialCharTok{\%\textgreater{}\%} \FunctionTok{filter}\NormalTok{(x }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{x, y }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{y) }\SpecialCharTok{\%\textgreater{}\%} \FunctionTok{pull}\NormalTok{(rangeland)}
+\NormalTok{    a2\_state }\OtherTok{\textless{}{-}}\NormalTok{ land\_grid }\SpecialCharTok{\%\textgreater{}\%} \FunctionTok{filter}\NormalTok{(x }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{x, y }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{y) }\SpecialCharTok{\%\textgreater{}\%} \FunctionTok{pull}\NormalTok{(rangeland)}
+    
+\NormalTok{    a1\_revisit }\OtherTok{\textless{}{-}} \FunctionTok{isTRUE}\NormalTok{(agent1}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"x"}\NormalTok{] }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{\&\&}
+\NormalTok{                           agent1}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"y"}\NormalTok{] }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{y)}
+\NormalTok{    a2\_revisit }\OtherTok{\textless{}{-}} \FunctionTok{isTRUE}\NormalTok{(agent2}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"x"}\NormalTok{] }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{\&\&}
+\NormalTok{                           agent2}\SpecialCharTok{$}\NormalTok{last\_cell[}\StringTok{"y"}\NormalTok{] }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{y)}
+    
+\NormalTok{    r1 }\OtherTok{\textless{}{-}} \FunctionTok{compute\_reward}\NormalTok{(a1}\SpecialCharTok{$}\NormalTok{action, same\_cell, a1\_revisit, a1\_state)}
+\NormalTok{    r2 }\OtherTok{\textless{}{-}} \FunctionTok{compute\_reward}\NormalTok{(a2}\SpecialCharTok{$}\NormalTok{action, same\_cell, a2\_revisit, a2\_state)}
+    
+\NormalTok{    new1 }\OtherTok{\textless{}{-}} \FunctionTok{transition\_rangeland}\NormalTok{(a1\_state, a1}\SpecialCharTok{$}\NormalTok{action, weather)}
+\NormalTok{    new2 }\OtherTok{\textless{}{-}} \FunctionTok{transition\_rangeland}\NormalTok{(a2\_state, a2}\SpecialCharTok{$}\NormalTok{action, weather)}
+    
+\NormalTok{    land\_grid[land\_grid}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{\&}\NormalTok{ land\_grid}\SpecialCharTok{$}\NormalTok{y }\SpecialCharTok{==}\NormalTok{ a1}\SpecialCharTok{$}\NormalTok{y, }\StringTok{"rangeland"}\NormalTok{] }\OtherTok{\textless{}{-}}\NormalTok{ new1}
+\NormalTok{    land\_grid[land\_grid}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{x }\SpecialCharTok{\&}\NormalTok{ land\_grid}\SpecialCharTok{$}\NormalTok{y }\SpecialCharTok{==}\NormalTok{ a2}\SpecialCharTok{$}\NormalTok{y, }\StringTok{"rangeland"}\NormalTok{] }\OtherTok{\textless{}{-}}\NormalTok{ new2}
+    
+    \CommentTok{\#agent1 \textless{}{-} update\_agent(agent1, a1, r1)}
+    \CommentTok{\#agent2 \textless{}{-} update\_agent(agent2, a2, r2)}
+    
+\NormalTok{    logs[[t]] }\OtherTok{\textless{}{-}} \FunctionTok{list}\NormalTok{(}
+      \AttributeTok{step =}\NormalTok{ t,}
+      \AttributeTok{weather =}\NormalTok{ weather,}
+      \AttributeTok{land\_grid =}\NormalTok{ land\_grid,}
+      \AttributeTok{a1 =}\NormalTok{ a1,}
+      \AttributeTok{a2 =}\NormalTok{ a2}
+\NormalTok{    )}
+\NormalTok{  \}}
+  
+  \FunctionTok{return}\NormalTok{(}\FunctionTok{list}\NormalTok{(}\AttributeTok{logs =}\NormalTok{ logs, }\AttributeTok{weather\_history =}\NormalTok{ weather\_trace))}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{results}{%
+\subparagraph{Results}\label{results}}
+
+Ecosystem degradation rate over time
+\includegraphics{mdp_2agents_adaptive_softmax_files/figure-latex/data reshape-1.pdf}
+
+Policy mix by cell by each agent
+
+\includegraphics{mdp_2agents_adaptive_softmax_files/figure-latex/data reshape policy mix-1.pdf}
+
+\end{document}
