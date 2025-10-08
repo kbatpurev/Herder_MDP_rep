@@ -29,6 +29,8 @@ date: "2025-08-07"
 .libPaths()
 .libPaths(new="C:/Data/RStudio")
 #libPaths(new="C:/rlibs/4.3.0/")
+#.libPaths(new="C:/Data/RStudio")
+
 
 library(jsonlite)
 library(highr)
@@ -86,7 +88,7 @@ draw_weather <- function() {
 ```
 
 ##### Transition matrix
-This is a long if then statement that defines how rangeland states relate to each action and weather condition combination. This needs to be coded up more efficiently for a hyper parameter grid search later on. But for now it is more of an illustration tool of how we perceive actions and climatic conditions impact the rangeland states. 
+This is a long if-then statement that defines how rangeland states relate to each action and weather condition combination. This statements illustrates  of how we perceive actions and climatic conditions impact the rangeland states. 
 ```{r transition matrix abpes ,echo=TRUE}
 transition_rangeland <- function(state, action, weather) {
   if (state == "degraded") return("degraded")  # terminal state
@@ -133,7 +135,7 @@ transition_rangeland <- function(state, action, weather) {
 ##### 2. Agents, actions and rewards
 
 ##### Reward structure and policy
-Here we define how income from actions (rewards) are calculated. Rewards are a function of herd size (type of action), actions of the other agent. The specific strategy an agent employs to weigh the pros and cons of each reward is called policy, in this case this strategy is a "softmax" approach which is to maximise rewards with a moderate tau (temperature) of 1. Temperature settings for the policy can vary between 2 and 0. 
+Here we define how income from actions (reward) are calculated. Reward is a function of how agents benefit from herd actions (in this case - herd size). The specific strategy an agent employs to weigh the pros and cons of each reward is called policy, in this case this strategy is a "softmax" approach which is to maximise rewards with a moderate tau (temperature) of 1. Temperature settings for the policy can vary between 2 and 0. 
 
 ###### *Lower tau → more greedy (e.g., 0.1)*
 ###### *Higher tau → more exploratory (e.g., 2.0)*
@@ -176,7 +178,7 @@ create_agent <- function(name, tau = 1.0) {
 
 ##### Action selection in space
 
-Agent selects actions depending on where they are in the landscape in relation to other agents - this is to emulate the preference for non overlapping grazing practices employed by herders, which only exists as a silent/social agreement and are often breached by outsiders and desperate herders. Agents also have to consider the last time they were in a cell, because they are penalised if they return to the same cell immediately - this is an attempt to emulate ecosystem recovery from land use. If an agent hasn't been to a cell before and never tried an action before then they assume reward to be an average of 2.This is clearly a naive and overly optimistic approach. Future simulation should focus on testing the sensitivity of this parameter.
+Agent selects actions depending on where they are in the landscape in relation to other agents - this is to emulate the preference for non-overlapping grazing practices employed by herders, which only exists as a silent/social agreement and are often breached by outsiders and desperate herders. Agents also have to consider the last time they were in a cell, because they are penalised if they return to the same cell immediately - this is an attempt to emulate ecosystem recovery from land use. If an agent hasn't been to a cell before and never tried an action before then they assume reward to be an average of 2.This is clearly a naive and overly optimistic approach. Future simulation should focus on testing the sensitivity of this parameter.
 
 ```{r action selection abpes, echo=TRUE}
 select_action <- function(agent) {
@@ -214,7 +216,8 @@ Alternative to using a constant of 2 as an average reward there is the option of
 
 ##### Simulation
 
-Simulation creates an plain of cells that all start from intact condition. Then agents start to operate in them, iteratively choosing actions and optimising rewards as described above. 
+Simulation creates an plain of cells that all start from intact condition. Then agents start to operate in them, iteratively choosing actions and optimising rewards as described above. Here we simulate 100 steps per agent x 200 independent runs. 
+
 ```{r simulations abpes, echo=TRUE}
 simulate_adaptive <- function(steps = 100) {
   land_grid <- all_cells %>% mutate(rangeland = "intact") #assumes that all cells start from an intact condition = which is naive
@@ -251,9 +254,6 @@ simulate_adaptive <- function(steps = 100) {
     land_grid[land_grid$x == a1$x & land_grid$y == a1$y, "rangeland"] <- new1
     land_grid[land_grid$x == a2$x & land_grid$y == a2$y, "rangeland"] <- new2
     
-    #agent1 <- update_agent(agent1, a1, r1)
-    #agent2 <- update_agent(agent2, a2, r2)
-    
     logs[[t]] <- list(
       step = t,
       weather = weather,
@@ -269,62 +269,161 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result abpes, include=FALSE}
-results <- simulate_adaptive(step=1400)
+set.seed(128)
+n_runs  <- 200
+n_steps <- 100
+
+results_list <- map(1:n_runs, ~ simulate_adaptive(steps = n_steps))
 ```
 
 
 #### Results
 
-Ecosystem degradation rate over time
+The landscape degradation rate summary graph below suggests that at the end of the 100 years, nearly 70% of the landscape would be degraded if assumptions about actions, climatic impacts and parameters in transition matrix were true. Under action based PES scenario, 50% of landscape is degraded in about 55 years based on the average of 200 independent simulation runs. 
+
 ```{r data reshape abpes, echo=FALSE, warning=FALSE}
-degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
-                            mutate(step = .x$step,
-                                   degraded = rangeland == "degraded"))
+# --- 2) Build % degraded per step per run ------------------------------------
+degradation_by_run <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(res, sim_id) {
+    # For each step, compute % degraded across the grid
+    purrr::map_dfr(res$logs, ~ .x$land_grid %>%
+                     mutate(step = .x$step,
+                            degraded = rangeland == "degraded")) %>%
+      group_by(step) %>%
+      summarise(pct_degraded = mean(degraded) * 100, .groups = "drop") %>%
+      mutate(sim = sim_id)
+  }
+)
 
-degradation_summary <- degradation_df %>%
+# --- 3) Mean and 95% interval across runs ------------------------------------
+degradation_mean <- degradation_by_run %>%
   group_by(step) %>%
-  summarise(pct_degraded = mean(degraded) * 100)
+  summarise(pct_degraded = mean(pct_degraded), .groups = "drop")
 
-ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
-  geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time - Action based PES", y = "% Degraded", x = "Step")
+degradation_ci <- degradation_by_run %>%
+  group_by(step) %>%
+  summarise(
+    mean = mean(pct_degraded),
+    lo   = quantile(pct_degraded, 0.025),
+    hi   = quantile(pct_degraded, 0.975),
+    .groups = "drop"
+  )
+
+# --- 4) Plot: all runs (grey), mean (solid), 95% ribbon ----------------------
+ggplot() +
+  geom_line(
+    data = degradation_by_run,
+    aes(x = step, y = pct_degraded, group = sim),
+    color = "grey70", alpha = 0.45
+  ) +
+  geom_ribbon(
+    data = degradation_ci,
+    aes(x = step, ymin = lo, ymax = hi),
+    fill = "firebrick", alpha = 0.12
+  ) +
+  geom_line(
+    data = degradation_mean,
+    aes(x = step, y = pct_degraded),
+    color = "firebrick", linewidth = 1.2
+  ) +    geom_hline(yintercept = 50)+
+  labs(
+    title = "Action based PES degradation over time — 200 runs (mean ± 95% CI)",
+    x = "Step", y = "% Degraded"
+  ) +
+  theme_minimal(base_size = 12)
 ```
 
 
 Policy mix by cell by each agent
 
 ```{r data reshape policy mix abpes, echo=FALSE, warning=FALSE}
-action_df <- map2_dfr(results$logs, results$weather_history, function(res, weather) {
-  tibble(
-    step = res$step,
-    weather = weather,
-    x1 = res$a1$x,
-    y1 = res$a1$y,
-    a1 = res$a1$action,
-    x2 = res$a2$x,
-    y2 = res$a2$y,
-    a2 = res$a2$action
-  )
-})
-action_long <- action_df %>%
+action_df_all <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(results, sim_id) {
+    # Build a per-step action frame for THIS run
+    map2_dfr(results$logs, results$weather_history, function(res, weather) {
+      tibble(
+        sim     = sim_id,
+        step    = res$step,
+        weather = weather,
+        x1 = res$a1$x, y1 = res$a1$y, a1 = res$a1$action,
+        x2 = res$a2$x, y2 = res$a2$y, a2 = res$a2$action
+      )
+    })
+  }
+)
+
+action_long_all <- action_df_all %>%
   pivot_longer(
     cols = c(x1, y1, a1, x2, y2, a2),
     names_to = c(".value", "agent"),
     names_pattern = "([a-z]+)([12])"
   ) %>%
-  mutate(agent = paste0("A", agent))
-action_long <- action_long %>% rename(action = a)
+  mutate(agent = paste0("A", agent)) %>%
+  rename(action = a)
 
-policy_map <- action_long %>%
-  group_by(agent, x, y) %>%
-  count(action) %>%
-  slice_max(n, n = 1, with_ties = FALSE)
+policy_map_weather <- action_long_all %>%
+  group_by(agent, x, y, weather, action) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup()
 
-ggplot(policy_map, aes(x = x, y = y, fill = action)) +
+high_actions <- c("400-600", ">600")
+low_actions  <- c("<100", "200-400")
+
+# compute % of cells in each bin per facet (agent × weather)
+summary_labels <- policy_map_weather %>%
+  group_by(agent, weather) %>%
+  summarise(
+    n_cells = n_distinct(x, y),
+    high = sum(action %in% high_actions),
+    low  = sum(action %in% low_actions),
+    high_pct = 100 * high / n_cells,
+    low_pct  = 100 * low  / n_cells,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label = paste0(
+      "High: ", sprintf("%.1f", high_pct), "%\n",
+      "Low: ",  sprintf("%.1f", low_pct),  "%"
+    )
+  )
+
+# find panel bounds to position label “on top”
+x_min <- min(policy_map_weather$x)
+x_max <- max(policy_map_weather$x)
+y_max <- max(policy_map_weather$y)
+
+# plot with labels
+ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
   geom_tile(color = "white") +
-  facet_wrap(~agent) +
+  facet_grid(agent ~ weather) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Dominant Stocking Rate by Agents - Action based PES", x = "land_grid X", y = "land_grid Y")
+  coord_fixed(clip = "off") +
+  # add a little extra headroom so labels sit “on top” of the grid
+  expand_limits(y = y_max + 0.8) +
+  # place the label near the top-left of each panel
+  geom_text(
+    data = summary_labels,
+    aes(
+      x = x_min,              # left edge
+      y = y_max + 0.55,       # just above the grid
+      label = label
+    ),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1,
+    size = 3.8, lineheight = 1.05, color = "gray20"
+  ) +
+  labs(
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
+    x = "Grid X", y = "Grid Y"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.margin = margin(10, 20, 10, 10),
+    strip.background = element_rect(fill = "grey90", color = NA)
+  )
 ```
 
 
@@ -526,63 +625,161 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result outpes, include=FALSE}
-results <- simulate_adaptive(step=1400)
+set.seed(121)
+n_runs  <- 200
+n_steps <- 100
+
+results_list <- map(1:n_runs, ~ simulate_adaptive(steps = n_steps))
 ```
 
 
 #### Results
 
-Ecosystem degradation rate is similar to Action based PES. Landscape reaches complete degradation in ~260 years. 
+Ecosystem degradation rate is similar to Action based PES. The 50% degradation threshold is reached in about 59 years.  
 
 ```{r data reshape outpes, echo=FALSE, warning=FALSE}
-degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
-                            mutate(step = .x$step,
-                                   degraded = rangeland == "degraded"))
+# --- 2) Build % degraded per step per run ------------------------------------
+degradation_by_run <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(res, sim_id) {
+    # For each step, compute % degraded across the grid
+    purrr::map_dfr(res$logs, ~ .x$land_grid %>%
+                     mutate(step = .x$step,
+                            degraded = rangeland == "degraded")) %>%
+      group_by(step) %>%
+      summarise(pct_degraded = mean(degraded) * 100, .groups = "drop") %>%
+      mutate(sim = sim_id)
+  }
+)
 
-degradation_summary <- degradation_df %>%
+# --- 3) Mean and 95% interval across runs ------------------------------------
+degradation_mean <- degradation_by_run %>%
   group_by(step) %>%
-  summarise(pct_degraded = mean(degraded) * 100)
+  summarise(pct_degraded = mean(pct_degraded), .groups = "drop")
 
-ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
-  geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time - Outcome based PES", y = "% Degraded", x = "Step")
+degradation_ci <- degradation_by_run %>%
+  group_by(step) %>%
+  summarise(
+    mean = mean(pct_degraded),
+    lo   = quantile(pct_degraded, 0.025),
+    hi   = quantile(pct_degraded, 0.975),
+    .groups = "drop"
+  )
+
+# --- 4) Plot: all runs (grey), mean (solid), 95% ribbon ----------------------
+ggplot() +
+  geom_line(
+    data = degradation_by_run,
+    aes(x = step, y = pct_degraded, group = sim),
+    color = "grey70", alpha = 0.45
+  ) +
+  geom_ribbon(
+    data = degradation_ci,
+    aes(x = step, ymin = lo, ymax = hi),
+    fill = "orange", alpha = 0.12
+  ) +
+  geom_line(
+    data = degradation_mean,
+    aes(x = step, y = pct_degraded),
+    color = "orange", linewidth = 1.2
+  ) +    geom_hline(yintercept = 50)+
+  labs(
+    title = "Outcome based PES degradation over time — 200 runs (mean ± 95% CI)",
+    x = "Step", y = "% Degraded"
+  ) +
+  theme_minimal(base_size = 12)
 ```
 
 
 Policy mix by cell by each agent
 
 ```{r data reshape policy mix outpes, echo=FALSE, warning=FALSE}
-action_df <- map2_dfr(results$logs, results$weather_history, function(res, weather) {
-  tibble(
-    step = res$step,
-    weather = weather,
-    x1 = res$a1$x,
-    y1 = res$a1$y,
-    a1 = res$a1$action,
-    x2 = res$a2$x,
-    y2 = res$a2$y,
-    a2 = res$a2$action
-  )
-})
-action_long <- action_df %>%
+action_df_all <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(results, sim_id) {
+    # Build a per-step action frame for THIS run
+    map2_dfr(results$logs, results$weather_history, function(res, weather) {
+      tibble(
+        sim     = sim_id,
+        step    = res$step,
+        weather = weather,
+        x1 = res$a1$x, y1 = res$a1$y, a1 = res$a1$action,
+        x2 = res$a2$x, y2 = res$a2$y, a2 = res$a2$action
+      )
+    })
+  }
+)
+
+action_long_all <- action_df_all %>%
   pivot_longer(
     cols = c(x1, y1, a1, x2, y2, a2),
     names_to = c(".value", "agent"),
     names_pattern = "([a-z]+)([12])"
   ) %>%
-  mutate(agent = paste0("A", agent))
-action_long <- action_long %>% rename(action = a)
+  mutate(agent = paste0("A", agent)) %>%
+  rename(action = a)
 
-policy_map <- action_long %>%
-  group_by(agent, x, y) %>%
-  count(action) %>%
-  slice_max(n, n = 1, with_ties = FALSE)
+policy_map_weather <- action_long_all %>%
+  group_by(agent, x, y, weather, action) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup()
 
-ggplot(policy_map, aes(x = x, y = y, fill = action)) +
+high_actions <- c("400-600", ">600")
+low_actions  <- c("<100", "200-400")
+
+# compute % of cells in each bin per facet (agent × weather)
+summary_labels <- policy_map_weather %>%
+  group_by(agent, weather) %>%
+  summarise(
+    n_cells = n_distinct(x, y),
+    high = sum(action %in% high_actions),
+    low  = sum(action %in% low_actions),
+    high_pct = 100 * high / n_cells,
+    low_pct  = 100 * low  / n_cells,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label = paste0(
+      "High: ", sprintf("%.1f", high_pct), "%\n",
+      "Low: ",  sprintf("%.1f", low_pct),  "%"
+    )
+  )
+
+# find panel bounds to position label “on top”
+x_min <- min(policy_map_weather$x)
+x_max <- max(policy_map_weather$x)
+y_max <- max(policy_map_weather$y)
+
+# plot with labels
+ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
   geom_tile(color = "white") +
-  facet_wrap(~agent) +
+  facet_grid(agent ~ weather) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Dominant Stocking Rate by Agents - Outcome based PES", x = "land_grid X", y = "land_grid Y")
+  coord_fixed(clip = "off") +
+  # add a little extra headroom so labels sit “on top” of the grid
+  expand_limits(y = y_max + 0.8) +
+  # place the label near the top-left of each panel
+  geom_text(
+    data = summary_labels,
+    aes(
+      x = x_min,              # left edge
+      y = y_max + 0.55,       # just above the grid
+      label = label
+    ),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1,
+    size = 3.8, lineheight = 1.05, color = "gray20"
+  ) +
+  labs(
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
+    x = "Grid X", y = "Grid Y"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.margin = margin(10, 20, 10, 10),
+    strip.background = element_rect(fill = "grey90", color = NA)
+  )
 ```
 
 ### **III. Null model - No PES **
@@ -597,6 +794,7 @@ knitr::include_graphics("No_incentive_for_additionality_27Aug.jpg")
 No incentive model is set up very similarly to Action and Outcome based PES models, apart from the reward structure. The only rewards that herders get are from goat rearing described in action_income string.  
 
 ```{r problem formulation nopes}
+
 land_grid_x <- 5
 land_grid_y <- 5
 all_cells <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1))
@@ -622,6 +820,7 @@ draw_weather <- function() {
 The total financial income for a herder is described through the compute_reward function below through the action_income string. 
 
 ```{r compute return nopes, echo=TRUE}
+
 compute_reward <- function(action, same_cell, revisit,cell_condition) {
   r <- action_income[action]
   if (same_cell) r <- r * 0.7
@@ -658,7 +857,9 @@ create_agent <- function(name, tau = 1.0) {
 
 Otherwise,climate effects and the transition matrix in No PES model are identical to the action and outcome based incentive designs. Action selection and the spatial coordination strategies are also identical to action and outcome based schemes. 
 
+No incentive model is set up very similarly to Action and Outcome based PES models, in that climate effects and the transition matrix are identical structure to the two incentive designs. 
 ```{r transition matrix nopes, echo=FALSE, include=FALSE}
+
 transition_rangeland <- function(state, action, weather) {
   if (state == "degraded") return("degraded")  # terminal state
   
@@ -701,8 +902,8 @@ transition_rangeland <- function(state, action, weather) {
 ```
 
 
+```{r action selection nopes, echo=FALSE}
 
-```{r action selection nopes, echo=FALSE, include=FALSE}
 select_action <- function(agent) {
   candidates <- expand.grid(x = 0:(land_grid_x - 1), y = 0:(land_grid_y - 1), action = actions)
   candidates$reward <- apply(candidates, 1, function(row) {
@@ -725,7 +926,6 @@ select_action <- function(agent) {
   return(candidates[choice, ])
 }
 ```
-
 
 
 ```{r simulations nopes, echo=FALSE, include =FALSE}
@@ -780,59 +980,156 @@ simulate_adaptive <- function(steps = 100) {
 ```
 
 ```{r simulation result nopes, include=FALSE}
-results <- simulate_adaptive(step=1400)
+set.seed(129)
+n_runs  <- 200
+n_steps <- 100
+results_list <- map(1:n_runs, ~ simulate_adaptive(steps = n_steps))
+
 ```
 
 
 #### Results
 
-Ecosystem degradation rate seems slightly faster than action and outcome based PES. 
+Ecosystem degradation rate is similar to Action Based PES. The dominant stocking rate seems to suggest the most common herd size herders choose when there is no PES is generally <400 goats (14/25 cells). 
 
 ```{r data reshape nopes, echo=FALSE, warning=FALSE}
-degradation_df <- map_dfr(results$logs, ~ .x$land_grid %>%
-                            mutate(step = .x$step,
-                                   degraded = rangeland == "degraded"))
+degradation_by_run <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(res, sim_id) {
+    # For each step, compute % degraded across the grid
+    purrr::map_dfr(res$logs, ~ .x$land_grid %>%
+                     mutate(step = .x$step,
+                            degraded = rangeland == "degraded")) %>%
+      group_by(step) %>%
+      summarise(pct_degraded = mean(degraded) * 100, .groups = "drop") %>%
+      mutate(sim = sim_id)
+  }
+)
 
-degradation_summary <- degradation_df %>%
+# --- 3) Mean and 95% interval across runs ------------------------------------
+degradation_mean <- degradation_by_run %>%
   group_by(step) %>%
-  summarise(pct_degraded = mean(degraded) * 100)
+  summarise(pct_degraded = mean(pct_degraded), .groups = "drop")
 
-ggplot(degradation_summary, aes(x = step, y = pct_degraded)) +
-  geom_line(size = 1.2, color = "darkred") +
-  labs(title = "Degradation Over Time - No PES", y = "% Degraded", x = "Step")
+degradation_ci <- degradation_by_run %>%
+  group_by(step) %>%
+  summarise(
+    mean = mean(pct_degraded),
+    lo   = quantile(pct_degraded, 0.025),
+    hi   = quantile(pct_degraded, 0.975),
+    .groups = "drop"
+  )
+
+# --- 4) Plot: all runs (grey), mean (solid), 95% ribbon ----------------------
+ggplot() +
+  geom_line(
+    data = degradation_by_run,
+    aes(x = step, y = pct_degraded, group = sim),
+    color = "grey70", alpha = 0.45
+  ) +
+  geom_ribbon(
+    data = degradation_ci,
+    aes(x = step, ymin = lo, ymax = hi),
+    fill = "skyblue", alpha = 0.12
+  ) +
+  geom_line(
+    data = degradation_mean,
+    aes(x = step, y = pct_degraded),
+    color = "skyblue", linewidth = 1.2
+  ) +    geom_hline(yintercept = 50)+
+  labs(
+    title = "No PES degradation over time— 200 runs (mean ± 95% CI)",
+    x = "Step", y = "% Degraded"
+  ) +
+  theme_minimal(base_size = 12)
 ```
 
 
 ```{r data reshape policy mix nopes, echo=FALSE, warning=FALSE}
-action_df <- map2_dfr(results$logs, results$weather_history, function(res, weather) {
-  tibble(
-    step = res$step,
-    weather = weather,
-    x1 = res$a1$x,
-    y1 = res$a1$y,
-    a1 = res$a1$action,
-    x2 = res$a2$x,
-    y2 = res$a2$y,
-    a2 = res$a2$action
-  )
-})
-action_long <- action_df %>%
+action_df_all <- map2_dfr(
+  results_list, seq_along(results_list),
+  function(results, sim_id) {
+    # Build a per-step action frame for THIS run
+    map2_dfr(results$logs, results$weather_history, function(res, weather) {
+      tibble(
+        sim     = sim_id,
+        step    = res$step,
+        weather = weather,
+        x1 = res$a1$x, y1 = res$a1$y, a1 = res$a1$action,
+        x2 = res$a2$x, y2 = res$a2$y, a2 = res$a2$action
+      )
+    })
+  }
+)
+
+action_long_all <- action_df_all %>%
   pivot_longer(
     cols = c(x1, y1, a1, x2, y2, a2),
     names_to = c(".value", "agent"),
     names_pattern = "([a-z]+)([12])"
   ) %>%
-  mutate(agent = paste0("A", agent))
-action_long <- action_long %>% rename(action = a)
+  mutate(agent = paste0("A", agent)) %>%
+  rename(action = a)
 
-policy_map <- action_long %>%
-  group_by(agent, x, y) %>%
-  count(action) %>%
-  slice_max(n, n = 1, with_ties = FALSE)
+policy_map_weather <- action_long_all %>%
+  group_by(agent, x, y, weather, action) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup()
 
-ggplot(policy_map, aes(x = x, y = y, fill = action)) +
+high_actions <- c("400-600", ">600")
+low_actions  <- c("<100", "200-400")
+
+# compute % of cells in each bin per facet (agent × weather)
+summary_labels <- policy_map_weather %>%
+  group_by(agent, weather) %>%
+  summarise(
+    n_cells = n_distinct(x, y),
+    high = sum(action %in% high_actions),
+    low  = sum(action %in% low_actions),
+    high_pct = 100 * high / n_cells,
+    low_pct  = 100 * low  / n_cells,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label = paste0(
+      "High: ", sprintf("%.1f", high_pct), "%\n",
+      "Low: ",  sprintf("%.1f", low_pct),  "%"
+    )
+  )
+
+# find panel bounds to position label “on top”
+x_min <- min(policy_map_weather$x)
+x_max <- max(policy_map_weather$x)
+y_max <- max(policy_map_weather$y)
+
+# plot with labels
+ggplot(policy_map_weather, aes(x = x, y = y, fill = action)) +
   geom_tile(color = "white") +
-  facet_wrap(~agent) +
+  facet_grid(agent ~ weather) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Dominant Stocking Rate by Agents - No PES", x = "land_grid X", y = "land_grid Y")
+  coord_fixed(clip = "off") +
+  # add a little extra headroom so labels sit “on top” of the grid
+  expand_limits(y = y_max + 0.8) +
+  # place the label near the top-left of each panel
+  geom_text(
+    data = summary_labels,
+    aes(
+      x = x_min,              # left edge
+      y = y_max + 0.55,       # just above the grid
+      label = label
+    ),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1,
+    size = 3.8, lineheight = 1.05, color = "gray20"
+  ) +
+  labs(
+    title = "Dominant Stocking Rate by Agents under different climate conditions",
+    x = "Grid X", y = "Grid Y"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.margin = margin(10, 20, 10, 10),
+    strip.background = element_rect(fill = "grey90", color = NA)
+  )
 ```
