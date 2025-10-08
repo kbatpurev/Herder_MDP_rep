@@ -1,11 +1,9 @@
-
 ---
 title: "Proof of concept - Exploring human dimensions of market-based incentive design with reinfocement
   learning"
-output:
-  html_document: default
-  pdf_document: default
-date: "2025-08-07"
+author: "Khorloo Batpurev"
+date: "`r Sys.Date()`"
+output: html_document
 ---
 
 ### Markov Decision Processes to predict ecosystem condition in Mongolia under different herding practices
