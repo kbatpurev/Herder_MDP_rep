@@ -8,7 +8,7 @@ output: html_document
 
 ### Markov Decision Processes to predict ecosystem condition in Mongolia under different herding practices
 
-*Markov Decision Processes (MDPs) is a probabilistic framework that computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impacts both actions and states.*
+*Markov Decision Processes (MDPs) is a probabilistic framework that computes the optimal course of action in a repeated-decisions scenario through iterative agent based learning. It belongs to a family of machine learning algorithms called Reinforcement Learning. Here we apply MDPs to explore how herder behaviour and practices affect ecosystem condition in Mongolian rangelands. We approach this problem as a spatially explicit multi-agent reinforcement learning problem (MARL) with herders as agents, goat rearing as actions, and environmental conditions as states and climate as a stochastic variable that impacts both actions and states. Here we simulate action selection of two agents under different incentive designs for a Payment for Ecosystem Services schemes.*
 
 
 #### Github repository
@@ -19,8 +19,8 @@ output: html_document
 
 ###### (V1. Toy version with two agents with softmax policy)
 
-1. Model 1 - Action based design
-2. Model 2 - Outcome based design
+1. Model 1 - Action based PES design 
+2. Model 2 - Outcome based PES design
 3. Null model - No incentive 
 
 ======================================================================================================================
