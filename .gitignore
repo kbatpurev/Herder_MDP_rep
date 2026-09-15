@@ -1,0 +1,9 @@
+# Ignore everything
+*
+
+# Keep .gitignore itself
+!.gitignore
+
+# Track only R and Rmd files directly in this folder
+!/*.R
+!/*.Rmd
