@@ -111,7 +111,7 @@ initial_actions<-c(A1="<200",A2="200-400",A3="200-400",A4="400-600",A5="400-600"
 #Direct herd income before survival adjustment
 herd_income<-c("<200"=0.8,"200-400"=2.0,"400-600"=2.5,">600"=3.5)
 #Outcome-based PES from absolute resulting EMA-defined rangeland condition
-state_pes<-c(intact=1.5,good=1.4,poor=0,degraded=0.0)
+state_pes<-c(intact=2.5,good=1.5,poor=0,degraded=0.0)
 #Expected stock survival by current rangeland condition and stocking action
 stock_survival<-matrix(
   c(

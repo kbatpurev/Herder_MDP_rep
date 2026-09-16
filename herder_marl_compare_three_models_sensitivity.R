@@ -37,6 +37,7 @@
 
 library(tidyverse)
 library(furrr)
+library(here)
 
 if(!requireNamespace("future",quietly=TRUE)||
    !requireNamespace("furrr",quietly=TRUE)){
@@ -700,8 +701,8 @@ run_three_model_designs<-function(
 # ============================================================
 
 N_RUNS<-10L
-N_STEPS<-250L
-SEED_START<-50000L
+N_STEPS<-100L
+SEED_START<-50001L
 
 configure_parallel(N_WORKERS)
 
@@ -916,6 +917,8 @@ plot_action_mix_comparison<-function(results,parameter_name){
 #Example:
 plot_action_mix_comparison(comparison_results,"PES_intensity")
 plot_action_mix_comparison(comparison_results,"drought_probability")
+plot_action_mix_comparison(comparison_results,"drought_probability_low")
+
 
 # ============================================================
 # 16. FINAL-STEP SUMMARY TABLE
