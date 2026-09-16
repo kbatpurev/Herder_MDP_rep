@@ -11,13 +11,15 @@
 #
 # The three model files are loaded into separate R environments so
 # functions/parameters with identical names do not overwrite each other.
+# Independent simulation runs are executed in parallel with Windows
+# multisession workers. Timesteps within a run remain sequential.
 #
 # For each shared parameter, the main plot places:
-#   Action-based PES | Outcome-based PES | No PES
+# Action-based PES | Outcome-based PES | No PES
 # side-by-side in facets, with baseline and altered parameter settings
 # shown within each panel.
 #
-# PES intensity is not defined for the No-PES model, so the PES-intensity
+# PES intensity is not defined for the No-PES model because there are no PES rewards, so the PES-intensity
 # sensitivity plot contains only the two PES models.
 #
 # IMPORTANT
@@ -34,6 +36,38 @@
 # ============================================================
 
 library(tidyverse)
+library(furrr)
+
+if(!requireNamespace("future",quietly=TRUE)||
+   !requireNamespace("furrr",quietly=TRUE)){
+  stop(
+    "Parallel sensitivity analysis requires packages 'future' and 'furrr'. ",
+    "Install once with install.packages(c('future','furrr'))."
+  )
+}
+
+get_parallel_workers<-function(max_workers=8L,reserve=2L){
+  available<-as.integer(future::availableCores())
+  as.integer(max(1L,min(max_workers,max(1L,available-reserve))))
+}
+
+N_WORKERS<-get_parallel_workers(
+  max_workers=6L,
+  reserve=2L
+)
+
+configure_parallel<-function(workers=N_WORKERS){
+  message("Parallel sensitivity analysis: ",workers," workers.")
+  future::plan(
+    future::multisession,
+    workers=workers
+  )
+}
+
+shutdown_parallel<-function(){
+  future::plan(future::sequential)
+}
+
 
 #Exact model filenames expected in the CURRENT working directory
 ACTION_MODEL_RMD<-file.path(getwd(),"herder_marl_action_based_PES_csv_transition.Rmd")
@@ -114,11 +148,13 @@ no_pes_env<-load_model_env(NO_PES_MODEL_RMD,"No PES")
 # ============================================================
 
 required_common<-c(
-  "simulate_marl","make_transition_matrix","base_transition",
+  "simulate_marl",
+  "base_transition",
   "climate_transition_source",
-  "ecological_actions","alpha","gamma","tau","memory_window","ema_alpha",
-  "weather_prob","colocation_multiplier","grid_nx","grid_ny",
-  "actions","r_states","stock_survival","herd_income",
+  "alpha","gamma","tau","memory_window","ema_alpha",
+  "weather_prob","colocation_multiplier",
+  "grid_nx","grid_ny",
+  "stock_survival","herd_income",
   "designated_cells","initial_actions"
 )
 
@@ -156,6 +192,23 @@ validate_model_env(action_env,"Action-based PES")
 validate_model_env(outcome_env,"Outcome-based PES")
 validate_model_env(no_pes_env,"No PES")
 
+loaded_model_check<-tibble(
+  pes_design=c("Action-based PES","Outcome-based PES","No PES"),
+  model_file=basename(c(ACTION_MODEL_RMD,OUTCOME_MODEL_RMD,NO_PES_MODEL_RMD)),
+  has_simulate_marl=c(
+    exists("simulate_marl",envir=action_env,inherits=FALSE),
+    exists("simulate_marl",envir=outcome_env,inherits=FALSE),
+    exists("simulate_marl",envir=no_pes_env,inherits=FALSE)
+  ),
+  has_transition_kernel=c(
+    exists("base_transition",envir=action_env,inherits=FALSE),
+    exists("base_transition",envir=outcome_env,inherits=FALSE),
+    exists("base_transition",envir=no_pes_env,inherits=FALSE)
+  )
+)
+
+print(loaded_model_check)
+
 same_transition_kernel<-function(env1,env2){
   identical(env1$climate_transition_source,env2$climate_transition_source)&&
     identical(env1$base_transition,env2$base_transition)
@@ -168,7 +221,7 @@ model_structure_check<-tibble(
     "Designated-cell rows",
     "Unique designated cells",
     "Emergency cost scale present",
-    "CSV transition kernel identical",
+    "Empirical transition kernel identical",
     "Stock survival identical",
     "Herd income identical"
   ),
@@ -178,7 +231,9 @@ model_structure_check<-tibble(
     nrow(action_env$designated_cells),
     n_distinct(action_env$designated_cells$cell_id),
     exists("emergency_cost_scale",envir=action_env,inherits=FALSE),
-    TRUE,TRUE,TRUE
+    TRUE,
+    TRUE,
+    TRUE
   ),
   outcome_based=c(
     outcome_env$grid_nx*outcome_env$grid_ny,
@@ -216,12 +271,16 @@ structure_same<-
   exists("emergency_cost_scale",envir=action_env,inherits=FALSE)==
     exists("emergency_cost_scale",envir=no_pes_env,inherits=FALSE)&&
   same_transition_kernel(action_env,outcome_env)&&
-  same_transition_kernel(action_env,no_pes_env)
+  same_transition_kernel(action_env,no_pes_env)&&
+  identical(action_env$stock_survival,outcome_env$stock_survival)&&
+  identical(action_env$stock_survival,no_pes_env$stock_survival)&&
+  identical(action_env$herd_income,outcome_env$herd_income)&&
+  identical(action_env$herd_income,no_pes_env$herd_income)
 
 if(!structure_same){
   warning(
-    "The three model files differ in movement, emergency-cost, or ",
-    "CSV-transition structure. Model-design comparisons may be confounded."
+    "The three model files differ in movement, emergency-cost, empirical-transition, ",
+    "stock-survival, or herd-income structure. Model-design comparisons may be confounded."
   )
 }
 
@@ -241,32 +300,36 @@ if(!structure_same){
 
 scenario_grid<-tribble(
   ~scenario,~alpha,~gamma,~tau,~memory_window,
-  ~drought_prob,~normal_prob,~rainy_prob,~pes_multiplier,
+  ~drought_prob,~normal_prob,~wet_prob,~pes_multiplier,
 
   "baseline",
   0.20,0.95,1.00,5L,
   0.30,0.50,0.20,1.00,
 
-  "high_alpha",
-  0.40,0.95,1.00,5L,
-  0.30,0.50,0.20,1.00,
+  #"high_alpha",
+  #0.40,0.95,1.00,5L,
+  #0.30,0.50,0.20,1.00,
 
-  "low_gamma",
-  0.20,0.50,1.00,5L,
-  0.30,0.50,0.20,1.00,
+  #"low_gamma",
+  #0.20,0.50,1.00,5L,
+  #0.30,0.50,0.20,1.00,
 
-  "high_tau",
-  0.20,0.95,2.00,5L,
-  0.30,0.50,0.20,1.00,
+  #"high_tau",
+  #0.20,0.95,2.00,5L,
+  #0.30,0.50,0.20,1.00,
 
   "long_memory",
   0.20,0.95,1.00,10L,
   0.30,0.50,0.20,1.00,
+  
+  "low_drought",
+  0.20,0.95,1.00,5L,
+  0.15,0.5,0.35,1.00,
 
   "high_drought",
   0.20,0.95,1.00,5L,
   0.50,0.35,0.15,1.00,
-
+  
   "high_PES",
   0.20,0.95,1.00,5L,
   0.30,0.50,0.20,1.50
@@ -274,25 +337,26 @@ scenario_grid<-tribble(
 
 parameter_map<-tribble(
   ~parameter,~variant_scenario,~variant_label,
-  "alpha","high_alpha","High alpha: 0.40",
-  "gamma","low_gamma","Low gamma: 0.50",
-  "tau","high_tau","High tau: 2.00",
+  #"alpha","high_alpha","High alpha: 0.40",
+  #"gamma","low_gamma","Low gamma: 0.50",
+  #"tau","high_tau","High tau: 2.00",
   "memory_window","long_memory","Long memory: 10",
-  "drought_probability","high_drought","Drought probability: 0.30 -> 0.50",
+  "drought_probability_low","low_drought","Low drought: 0.15, normal: 0.50, wet: 0.35",
+  "drought_probability","high_drought","High drought: 0.50, normal:0.30, wet:0.20",
   "PES_intensity","high_PES","PES multiplier: 1.50"
 )
 
 validate_scenario_grid<-function(x){
   required<-c(
-    "scenario","alpha","gamma","tau","memory_window",
-    "drought_prob","normal_prob","rainy_prob","pes_multiplier"
+    "scenario","memory_window",
+    "drought_prob","normal_prob","wet_prob","pes_multiplier"
   )
   missing<-setdiff(required,names(x))
   if(length(missing)>0){
     stop("scenario_grid is missing: ",paste(missing,collapse=", "))
   }
 
-  weather_sum<-x$drought_prob+x$normal_prob+x$rainy_prob
+  weather_sum<-x$drought_prob+x$normal_prob+x$wet_prob
   if(any(abs(weather_sum-1)>1e-10)){
     stop("Weather probabilities must sum to 1.")
   }
@@ -310,7 +374,7 @@ validate_scenario_grid(scenario_grid)
 # NOTE:
 # The old high_grazing_impact and high_weather_impact scenarios were removed.
 # They depended on action_deterioration and weather_deterioration, which no
-# longer exist in the CSV-derived ecological transition model. Sensitivity
+# longer exist in the empirical ecological transition model. Sensitivity
 # tests on the transition kernel should be defined directly on the empirical
 # transition probabilities rather than recreating those retired parameters.
 
@@ -395,7 +459,7 @@ apply_scenario<-function(env,baseline,pes_design,scenario_row){
   env$weather_prob<-c(
     drought=scenario_row$drought_prob[[1]],
     normal=scenario_row$normal_prob[[1]],
-    rainy=scenario_row$rainy_prob[[1]]
+    wet=scenario_row$wet_prob[[1]]
   )
 
   if(pes_design=="Action-based PES"){
@@ -419,65 +483,86 @@ run_scenario<-function(
     baseline,
     pes_design,
     scenario_row,
-    n_runs=20L,
-    steps=500L,
+    n_runs=10L,
+    steps=250L,
     seed_start=50000L
 ){
   scenario_name<-scenario_row$scenario[[1]]
   message("\n",pes_design," | ",scenario_name)
   apply_scenario(env,baseline,pes_design,scenario_row)
 
-  runs<-map(seq_len(n_runs),function(run_id){
-    message("  Run ",run_id," / ",n_runs)
-    #Same seed sequence is used across all model designs and scenarios.
-    res<-env$simulate_marl(
-      steps=steps,
-      seed=seed_start+run_id-1L
-    )
-
-    landscape<-res$landscape_counts%>%
-      mutate(
-        pes_design=pes_design,
-        scenario=scenario_name,
-        run=run_id,
-        prop_degraded=degraded/(env$grid_nx*env$grid_ny)
+  #Each run is a fully independent learning/ecological realization.
+  #Parallelize at this level; do not parallelize timesteps within simulate_marl().
+  runs<-furrr::future_map(
+    seq_len(n_runs),
+    function(run_id){
+      #Same explicit seed sequence is used across all model designs and scenarios.
+      #This preserves the common-random-number comparison while remaining
+      #reproducible regardless of which worker executes the run.
+      res<-env$simulate_marl(
+        steps=steps,
+        seed=seed_start+run_id-1L
       )
 
-    cells<-res$cell_ledger%>%
-      mutate(
-        pes_design=pes_design,
-        scenario=scenario_name,
-        run=run_id
-      )
+      landscape<-res$landscape_counts%>%
+        mutate(
+          pes_design=pes_design,
+          scenario=scenario_name,
+          run=run_id,
+          prop_degraded=degraded/(env$grid_nx*env$grid_ny)
+        )
 
-    actions<-res$action_log%>%
-      mutate(
-        pes_design=pes_design,
-        scenario=scenario_name,
-        run=run_id
-      )
-
-    if("pes_reward"%in%names(actions)){
-      actions$pes_signal<-actions$pes_reward
-    }else if("state_pes_reward"%in%names(actions)){
-      actions$pes_signal<-actions$state_pes_reward
-    }else{
-      actions$pes_signal<-NA_real_
-    }
-
-    if(!is.null(res$q_log)){
-      q<-res$q_log%>%
+      cells<-res$cell_ledger%>%
         mutate(
           pes_design=pes_design,
           scenario=scenario_name,
           run=run_id
         )
-    }else{
-      q<-tibble()
-    }
 
-    list(landscape=landscape,cells=cells,actions=actions,q=q)
-  })
+      actions<-res$action_log%>%
+        mutate(
+          pes_design=pes_design,
+          scenario=scenario_name,
+          run=run_id
+        )
+
+      if("pes_reward"%in%names(actions)){
+        actions$pes_signal<-actions$pes_reward
+      }else if("state_pes_reward"%in%names(actions)){
+        actions$pes_signal<-actions$state_pes_reward
+      }else{
+        actions$pes_signal<-NA_real_
+      }
+
+      if(!is.null(res$q_log)){
+        q<-res$q_log%>%
+          mutate(
+            pes_design=pes_design,
+            scenario=scenario_name,
+            run=run_id
+          )
+      }else{
+        q<-tibble()
+      }
+
+      list(
+        landscape=landscape,
+        cells=cells,
+        actions=actions,
+        q=q
+      )
+    },
+    .options=furrr::furrr_options(
+      seed=TRUE,
+      scheduling=1,
+      packages=c(
+        "dplyr",
+        "tidyr",
+        "purrr",
+        "tibble"
+      )
+    )
+  )
 
   list(
     landscape=map_dfr(runs,"landscape"),
@@ -496,8 +581,8 @@ run_model_grid<-function(
     baseline,
     pes_design,
     scenario_grid,
-    n_runs=20L,
-    steps=500L,
+    n_runs=10L,
+    steps=250L,
     seed_start=50000L
 ){
   validate_scenario_grid(scenario_grid)
@@ -529,8 +614,8 @@ run_model_grid<-function(
 
 run_three_model_designs<-function(
     scenario_grid,
-    n_runs=20L,
-    steps=500L,
+    n_runs=10L,
+    steps=250L,
     seed_start=50000L
 ){
   action_results<-run_model_grid(
@@ -599,7 +684,7 @@ run_three_model_designs<-function(
 #
 # Use this first.
 #
-#comparison_test<-run_three_model_designs(
+# comparison_test<-run_three_model_designs(
 #   scenario_grid=scenario_grid,
 #   n_runs=3L,
 #   steps=100L,
@@ -614,18 +699,23 @@ run_three_model_designs<-function(
 # 10. FULL RUN
 # ============================================================
 
-N_RUNS<-20L
-N_STEPS<-500L
+N_RUNS<-10L
+N_STEPS<-250L
 SEED_START<-50000L
 
-comparison_results<-run_three_model_designs(
-  scenario_grid=scenario_grid,
-  n_runs=N_RUNS,
-  steps=N_STEPS,
-  seed_start=SEED_START
+configure_parallel(N_WORKERS)
+
+comparison_results<-tryCatch(
+  run_three_model_designs(
+    scenario_grid=scenario_grid,
+    n_runs=N_RUNS,
+    steps=N_STEPS,
+    seed_start=SEED_START
+  ),
+  finally=shutdown_parallel()
 )
 
-# ============================================================
+c# ============================================================
 # 11. PARAMETER LOOKUP
 # ============================================================
 
@@ -676,17 +766,17 @@ make_parameter_degradation_plot<-function(results,parameter_name){
     )
 
   ggplot()+
-    #geom_line(
-      #data=plot_data,
-      #aes(
-        #x=step,
-        #y=prop_degraded,
-        #colour=setting,
-        #group=interaction(setting,run)
-      #),
-      #alpha=0.15,
-      #linewidth=0.30
-    #)+
+    geom_line(
+      data=plot_data,
+      aes(
+        x=step,
+        y=prop_degraded,
+        colour=setting,
+        group=interaction(setting,run)
+      ),
+      alpha=0.15,
+      linewidth=0.30
+    )+
     geom_ribbon(
       data=summary_data,
       aes(x=step,ymin=lower,ymax=upper,fill=setting),
@@ -708,9 +798,9 @@ make_parameter_degradation_plot<-function(results,parameter_name){
       subtitle=if(
         parameter_name=="PES_intensity"
       ){
-        "PES payment increased by 50% under two designs"
+        "PES intensity applies only to the two PES models; No PES is not applicable"
       }else{
-        ""
+        "Same parameter test shown side-by-side across all three model designs"
       },
       x="Iteration",
       y="Proportion of degraded cells",
@@ -722,9 +812,10 @@ make_parameter_degradation_plot<-function(results,parameter_name){
 }
 
 #Examples:
-make_parameter_degradation_plot(comparison_results,"drought_probability")
+#make_parameter_degradation_plot(comparison_results,"gamma")
 make_parameter_degradation_plot(comparison_results,"PES_intensity")
-make_parameter_degradation_plot(comparison_results,"tau")
+make_parameter_degradation_plot(comparison_results,"drought_probability_low")
+
 
 # ============================================================
 # 13. PRINT ONE FACET PLOT FOR EVERY PARAMETER
@@ -741,13 +832,11 @@ parameter_degradation_plots<-setNames(
 walk(parameter_degradation_plots,print)
 
 #Individual plots are available as:
-parameter_degradation_plots$alpha
-parameter_degradation_plots$gamma
-parameter_degradation_plots$tau
+#parameter_degradation_plots$alpha
+#parameter_degradation_plots$gamma
+#parameter_degradation_plots$tau
 parameter_degradation_plots$memory_window
 parameter_degradation_plots$drought_probability
-#parameter_degradation_plots$grazing_impact
-#parameter_degradation_plots$weather_impact
 parameter_degradation_plots$PES_intensity
 
 # ============================================================
@@ -793,10 +882,10 @@ plot_cell_degradation_comparison<-function(
 
 #Example:
 plot_cell_degradation_comparison(
-  comparison_results,
-  parameter_name="memory_window",
-  run_id=1
- )
+ comparison_results,
+ parameter_name="drought_probability",
+ run_id=1
+)
 
 # ============================================================
 # 15. VISUAL C: ACTION MIX
@@ -825,7 +914,8 @@ plot_action_mix_comparison<-function(results,parameter_name){
 }
 
 #Example:
-plot_action_mix_comparison(comparison_results,"tau")
+plot_action_mix_comparison(comparison_results,"PES_intensity")
+plot_action_mix_comparison(comparison_results,"drought_probability")
 
 # ============================================================
 # 16. FINAL-STEP SUMMARY TABLE
@@ -855,35 +945,62 @@ print(final_landscape_summary)
 #
 comparison_results$landscape
 # comparison_results$cells
-comparison_results$actions
+# comparison_results$actions
 # comparison_results$q
 # comparison_results$scenarios
 # comparison_results$parameter_map
 # comparison_results$structure_check
 #
 # Main plots:
-# parameter_degradation_plots
+parameter_degradation_plots
 # plot_cell_degradation_comparison(...)
 # plot_action_mix_comparison(...)
 #
 # ============================================================
-# ============================================================
-# 17. LOOKING AT PARAMETERS SEPARATELY for cumulative impact
-# ============================================================
+
+
+#Cumulative plots
+landscape_auc<-comparison_results$landscape%>%
+  arrange(
+    pes_design,
+    scenario,
+    run,
+    step
+  )%>%
+  group_by(
+    pes_design,
+    scenario,
+    run
+  )%>%
+  summarise(
+    auc=sum(
+      diff(step)*
+        (
+          head(prop_degraded,-1)+
+            tail(prop_degraded,-1)
+        )/2
+    ),
+    time_span=max(step)-min(step),
+    normalized_auc=100*auc/time_span,
+    .groups="drop"
+  )
+
+scenario_order<-c(
+  "baseline",
+  "high_alpha",
+  "low_gamma",
+  "high_tau",
+  "long_memory",
+  "low_drought",
+  "high_drought",
+  "high_PES"
+)
 
 landscape_auc<-landscape_auc%>%
   mutate(
     scenario=factor(
       scenario,
-      levels=c(
-        "baseline",
-        "high_alpha",
-        "low_gamma",
-        "high_tau",
-        "long_memory",
-        "high_drought",
-        "high_PES"
-      )
+      levels=scenario_order
     ),
     pes_design=factor(
       pes_design,
@@ -900,40 +1017,111 @@ landscape_auc<-landscape_auc%>%
     )
   )
 
-landscape_auc%>%
-  ggplot(
-    aes(
-      x=scenario,
-      y=normalized_auc,
-      fill=pes_design
-    )
-  )+
+#Cumulative landscape degradation plot
+p_degradation<-ggplot(
+  landscape_auc,
+  aes(
+    x=scenario,
+    y=normalized_auc,
+    fill=pes_design
+  )
+)+
   geom_boxplot(
     position=position_dodge(width=0.8),
     width=0.7,
     outlier.shape=NA
   )+
   geom_point(
-    aes(
-      group=pes_design
-    ),
+    aes(group=pes_design),
     position=position_jitterdodge(
       dodge.width=0.8,
       jitter.width=0.08
     ),
-    alpha=0.45,
-    size=1.5
+    alpha=0.35,
+    size=1.2
   )+
   labs(
-    title="Cumulative landscape degradation across sensitivity scenarios",
-    x="Scenario",
-    y="Normalized AUC (%)",
+    x="Sensitivity scenario",
+    y="Cumulative landscape degradation (%)",
     fill="PES design"
   )+
   theme_minimal()+
   theme(
     axis.text.x=element_text(
-      angle=45,
+      #angle=45,
       hjust=1
     )
   )
+
+p_degradation
+
+cumulative_reward<-comparison_results$actions%>%
+  group_by(
+    pes_design,
+    scenario,
+    run
+  )%>%
+  summarise(
+    cumulative_reward=sum(
+      reward,
+      na.rm=TRUE
+    ),
+    .groups="drop"
+  )%>%
+  mutate(
+    scenario=factor(
+      scenario,
+      levels=scenario_order
+    ),
+    pes_design=factor(
+      pes_design,
+      levels=c(
+        "Action-based PES",
+        "Outcome-based PES",
+        "No PES"
+      ),
+      labels=c(
+        "Action",
+        "Outcome",
+        "None"
+      )
+    )
+  )
+
+#Cumulative reward
+p_reward<-ggplot(
+  cumulative_reward,
+  aes(
+    x=scenario,
+    y=cumulative_reward,
+    fill=pes_design
+  )
+)+
+  geom_boxplot(
+    position=position_dodge(width=0.8),
+    width=0.7,
+    outlier.shape=NA
+  )+
+  geom_point(
+    aes(group=pes_design),
+    position=position_jitterdodge(
+      dodge.width=0.8,
+      jitter.width=0.08
+    ),
+    alpha=0.35,
+    size=1.2
+  )+
+  labs(
+    x="Sensitivity scenario",
+    y="Cumulative reward",
+    fill="PES design"
+  )+
+  theme_minimal()+
+  theme(
+    axis.text.x=element_text(
+      #angle=45,
+      hjust=1
+    )
+  )
+
+p_reward

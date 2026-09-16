@@ -124,8 +124,9 @@ stock_survival<-matrix(
   byrow=TRUE,
   dimnames=list(r_states,actions)
 )
-#Weather
+#Weather. This gets changed in the sensitivity test to different frequencies
 weather_prob<-c(drought=0.30,normal=0.50,wet=0.20)
+
 #Q-learning paras
 alpha<-0.20
 gamma<-0.95
@@ -1860,7 +1861,7 @@ This is one continuous learning trajectory. Q tables carry forward throughout th
 
 ```{r train-model}
 results_train<-simulate_marl(
-  steps = 500,
+  steps = 250,
   seed = 128
 )
 ```
@@ -1889,7 +1890,7 @@ results_train$action_log %>%
   mutate(
     period = cut(
       step,
-      breaks = seq(0, 500, by = 50),
+      breaks = seq(0, 250, by = 50),
       include.lowest = TRUE
     )
   ) %>%
@@ -2010,27 +2011,62 @@ We need a continuous training trajectory with independent simulation replicates.
 - all six Q tables.
 
 ```{r independent-replicates}
+get_parallel_workers<-function(max_workers=6L,reserve=2L){
+  available<-as.integer(future::availableCores())
+  as.integer(max(1L,min(max_workers,max(1L,available-reserve))))
+}
+
 run_independent_replicates<-function(
-    n_runs = 20L,
-    steps = 100L,
-    seed_start = 1000L
-) {
-  map_dfr(
+    n_runs=20L,
+    steps=250L,
+    seed_start=1000L,
+    workers=NULL
+){
+  if(!requireNamespace("future",quietly=TRUE)||
+     !requireNamespace("furrr",quietly=TRUE)){
+    stop(
+      "Parallel runs require packages 'future' and 'furrr'. ",
+      "Install once with install.packages(c('future','furrr'))."
+    )
+  }
+
+  if(is.null(workers)){
+    workers<-get_parallel_workers()
+  }
+  workers<-as.integer(max(1L,workers))
+  message("Running ",n_runs," independent simulations on ",workers," workers.")
+
+  future::plan(
+    future::multisession,
+    workers=workers
+  )
+  on.exit(
+    future::plan(future::sequential),
+    add=TRUE
+  )
+
+  furrr::future_map_dfr(
     seq_len(n_runs),
-    function(run_id) {
+    function(run_id){
       res<-simulate_marl(
-        steps = steps,
-        seed = seed_start + run_id
+        steps=steps,
+        seed=seed_start+run_id
       )
-      res$landscape_counts %>%
-        mutate(run = run_id)
-    }
+
+      res$landscape_counts%>%
+        mutate(run=run_id)
+    },
+    .options=furrr::furrr_options(
+      seed=TRUE,
+      scheduling=1
+    )
   )
 }
+
 replicate_degradation<-run_independent_replicates(
-  n_runs = 20,
-  steps = 100,
-  seed_start = 2000
+  n_runs=20L,
+  steps=250L,
+  seed_start=2000L
 )
 ```
 
@@ -2062,20 +2098,20 @@ replicate_degradation %>%
   theme_minimal()
 ```
 
+
 ## Complexity backlog — deliberately excluded for now
 
 
 The following components are intentionally **not** implemented in this file so that they can be reintroduced one at a time later:
 
-1. Direct empirical estimation of current-condition-specific recovery; current non-intact rows use the documented interpolation and recovery constraints in Step 5.
+1. Partially observable transition tables--> Reality or .
 2. Agent action bias / \(\eta\).
 3. Agent reward memory, spatial memory, or learned location preferences.
 4. Historical emergency-movement propensity and stochastic mobility eligibility.
 5. Heterogeneous \(\alpha\), \(\gamma\), and \(\tau\) between agents.
-6. Outcome-based PES.
-7. Explicit social networks beyond shared location/herd-size information.
-8. Grazing effects on cells crossed during emergency travel.
-9. Joint-action Q tables, centralized critics, or deep MARL.
-10. Full landscape rollouts / Monte Carlo tree search.
-11. Seasonal pasture polygons larger than two designated cells.
-12. Endogenous herd demography and persistent carry-forward of livestock losses. Current-period stock survival is implemented, but surviving herd size is not yet a state variable.
+6. Explicit social networks beyond shared location/herd-size information.
+7. Grazing effects on cells crossed during emergency travel.
+8. Joint-action Q tables, centralized critics, or deep MARL.
+9. Full landscape rollouts / Monte Carlo tree search.
+10. Seasonal pasture polygons larger than two designated cells.
+11. Endogenous herd demography and persistent carry-forward of livestock losses. Current-period stock survival is implemented, but surviving herd size is not yet a state variable.

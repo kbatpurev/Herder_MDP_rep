@@ -144,8 +144,9 @@ stock_survival<-matrix(
   byrow=TRUE,
   dimnames=list(r_states,actions)
 )
-#Weather
-weather_prob<-c(drought=0.30,normal=0.50,rainy=0.20)
+#Weather. This gets changed in the sensitivity test to different frequencies
+weather_prob<-c(drought=0.30,normal=0.50,wet=0.20)
+
 #Q-learning
 alpha<-0.20
 gamma<-0.95
@@ -322,7 +323,7 @@ The source CSV contains the joint relationship between climate, stocking categor
 
 There is no directly sampled `poor` transition signal. `poor` remains an EMA-derived persistent state when the cell EMA is between 1.5 and 2.5.
 
-The CSV has no starting-condition field. The empirical rows are therefore interpreted as the transition-signal distribution for a cell whose current persistent condition is `intact`. This is an explicit model assumption, not a property observed in the CSV. The source climate category `wet` is stored as `rainy` below to preserve the weather labels used elsewhere in the existing MARL model.
+The CSV has no starting-condition field. The empirical rows are therefore interpreted as the transition-signal distribution for a cell whose current persistent condition is `intact`. This is an explicit model assumption, not a property observed in the CSV. The source climate category `wet` is stored as `wet` below to preserve the weather labels used elsewhere in the existing MARL model.
 
 The remaining current-condition rows are constructed as follows for each action x weather combination:
 
@@ -340,33 +341,33 @@ For current `poor` and `degraded` conditions, a direct transition signal to `int
 
 For a currently degraded cell:
 
-- under `rainy` + `none`, degraded -> good recovery probability is 0.80;
-- under `rainy` + `<200`, recovery is 0.50;
-- under `rainy` + `>600`, recovery is 0.01;
-- `rainy` + `200-400` and `400-600` are interpolated using the empirical action gradient in `1-P(degraded)` from the CSV;
+- under `wet` + `none`, degraded -> good recovery probability is 0.80;
+- under `wet` + `<200`, recovery is 0.50;
+- under `wet` + `>600`, recovery is 0.01;
+- `wet` + `200-400` and `400-600` are interpolated using the empirical action gradient in `1-P(degraded)` from the CSV;
 - under `normal` + `none`, recovery is 0.66;
 - under `drought` + `none`, recovery is 0.01;
 - under `normal` or `drought` with any positive grazing category, a degraded cell remains degraded with probability 1.
 
-For `none`, which is absent from the source CSV, the intact-start persistence anchors are 0.99 under `rainy` and `normal` and 0.01 under `drought`. The remaining probability is split between `good` and `degraded` using the same-weather `<200` empirical good:degraded ratio.
+For `none`, which is absent from the source CSV, the intact-start persistence anchors are 0.99 under `wet` and `normal` and 0.01 under `drought`. The remaining probability is split between `good` and `degraded` using the same-weather `<200` empirical good:degraded ratio.
 
 ```{r base-transition}
 #Embedded directly from climate_example.csv.
-#The CSV source label "wet" is mapped to the model's existing label "rainy".
+#The CSV source label "wet" is mapped to the model's existing label "wet".
 climate_transition_source<-tribble(
   ~weather,~action,~intact,~good,~degraded,
-  "rainy","<200",0.866489361702128,0.096276595744681,0.037234042553192,
-  "rainy","200-400",0.742542553191489,0.157563829787234,0.099893617021277,
-  "rainy","400-600",0.594468085106383,0.227765957446809,0.177765957446809,
-  "rainy",">600",0.434893617021277,0.268936170212766,0.296170212765957,
-  "normal","<200",0.743829787234042,0.183723404255319,0.072446808510638,
-  "normal","200-400",0.585638297872340,0.240425531914894,0.173936170212766,
-  "normal","400-600",0.392553191489362,0.290638297872340,0.316808510638298,
-  "normal",">600",0.258085106382979,0.281063829787234,0.460851063829787,
-  "drought","<200",0.490638297872340,0.307659574468085,0.201702127659574,
-  "drought","200-400",0.348085106382979,0.306702127659574,0.345212765957447,
-  "drought","400-600",0.232712765957447,0.272978723404255,0.494308510638298,
-  "drought",">600",0.126063829787234,0.225531914893617,0.648404255319149
+  "wet","<200",0.8665,0.0963,0.0372,
+  "wet","200-400",0.7425,0.1576,0.0999,
+  "wet","400-600",0.5945,0.2278,0.1777,
+  "wet",">600",0.4349,0.2689,0.2962,
+  "normal","<200",0.7438,0.1837,0.0725,
+  "normal","200-400",0.5856,0.2404,0.1740,
+  "normal","400-600",0.3926,0.2906,0.3168,
+  "normal",">600",0.2581,0.2811,0.4608,
+  "drought","<200",0.4906,0.3077,0.2017,
+  "drought","200-400",0.3481,0.3067,0.3452,
+  "drought","400-600",0.2327,0.2730,0.4943,
+  "drought",">600",0.1261,0.2255,0.6484
 )
 transition_signal_states<-c("intact","good","degraded")
 make_prob_vector<-function(intact,good,degraded){
@@ -387,7 +388,7 @@ empirical_intact_prob<-function(action,weather){
   make_prob_vector(row$intact[[1]],row$good[[1]],row$degraded[[1]])
 }
 #Explicit no-grazing anchors for an intact current condition.
-none_intact_persistence<-c(rainy=0.99,normal=0.99,drought=0.01)
+none_intact_persistence<-c(wet=0.99,normal=0.99,drought=0.01)
 make_none_intact_prob<-function(weather){
   stopifnot(weather%in%names(weather_prob))
   p_intact<-unname(none_intact_persistence[[weather]])
@@ -403,29 +404,29 @@ make_none_intact_prob<-function(weather){
 intact_start_prob<-function(action,weather){
   if(action=="none")make_none_intact_prob(weather) else empirical_intact_prob(action,weather)
 }
-#CSV-shaped rainy recovery curve for a currently degraded grazed cell.
-rainy_recovery_shape<-climate_transition_source%>%
-  filter(weather=="rainy")%>%
+#Wet recovery curve for a currently degraded grazed cell.
+wet_recovery_shape<-climate_transition_source%>%
+  filter(weather=="wet")%>%
   mutate(recovery_favourability=1-degraded)%>%
   arrange(match(action,actions))
-rainy_fav_low<-rainy_recovery_shape$recovery_favourability[
-  rainy_recovery_shape$action==">600"
+wet_fav_low<-wet_recovery_shape$recovery_favourability[
+  wet_recovery_shape$action==">600"
 ]
-rainy_fav_high<-rainy_recovery_shape$recovery_favourability[
-  rainy_recovery_shape$action=="<200"
+wet_fav_high<-wet_recovery_shape$recovery_favourability[
+  wet_recovery_shape$action=="<200"
 ]
-rainy_recovery_shape<-rainy_recovery_shape%>%
+wet_recovery_shape<-wet_recovery_shape%>%
   mutate(
-    shape=(recovery_favourability-rainy_fav_low)/(rainy_fav_high-rainy_fav_low),
+    shape=(recovery_favourability-wet_fav_low)/(wet_fav_high-wet_fav_low),
     degraded_to_good=0.01+shape*(0.50-0.01)
   )
-degraded_none_recovery<-c(rainy=0.80,normal=0.66,drought=0.01)
+degraded_none_recovery<-c(wet=0.80,normal=0.66,drought=0.01)
 degraded_recovery_prob<-function(action,weather){
-  stopifnot(action%in%ecological_actions,weather%in%names(weather_prob))
+  stopifnot(action%in%ecological_footprints,weather%in%names(weather_prob))
   if(action=="none")return(unname(degraded_none_recovery[[weather]]))
-  if(weather!="rainy")return(0)
-  row<-rainy_recovery_shape[rainy_recovery_shape$action==action,,drop=FALSE]
-  if(nrow(row)!=1L)stop("Expected one rainy recovery row.")
+  if(weather!="wet")return(0)
+  row<-wet_recovery_shape[wet_recovery_shape$action==action,,drop=FALSE]
+  if(nrow(row)!=1L)stop("Expected one wet recovery row.")
   row$degraded_to_good[[1]]
 }
 degraded_start_prob<-function(action,weather){
@@ -444,7 +445,7 @@ apply_recovery_constraint<-function(prob,current_condition){
   prob
 }
 make_transition_matrix<-function(action,weather){
-  stopifnot(action%in%ecological_actions,weather%in%names(weather_prob))
+  stopifnot(action%in%ecological_footprints,weather%in%names(weather_prob))
   p_intact<-intact_start_prob(action,weather)
   p_degraded<-apply_recovery_constraint(
     degraded_start_prob(action,weather),
@@ -466,13 +467,13 @@ make_transition_matrix<-function(action,weather){
   M
 }
 base_transition<-setNames(
-  lapply(ecological_actions,function(a){
+  lapply(ecological_footprints,function(a){
     setNames(
       lapply(names(weather_prob),function(w){make_transition_matrix(a,w)}),
       names(weather_prob)
     )
   }),
-  ecological_actions
+  ecological_footprints
 )
 sample_next_condition<-function(current_condition,action,weather){
   transition_matrix<-base_transition[[action]][[weather]]
@@ -513,20 +514,20 @@ for(i in seq_len(nrow(climate_transition_source))){
   stopifnot(max(abs(expected-observed))<1e-10)
 }
 #Explicit no-grazing anchors.
-stopifnot(abs(base_transition[["none"]][["rainy"]]["intact","intact"]-0.99)<1e-12)
+stopifnot(abs(base_transition[["none"]][["wet"]]["intact","intact"]-0.99)<1e-12)
 stopifnot(abs(base_transition[["none"]][["normal"]]["intact","intact"]-0.99)<1e-12)
 stopifnot(abs(base_transition[["none"]][["drought"]]["intact","intact"]-0.01)<1e-12)
-stopifnot(abs(base_transition[["none"]][["rainy"]]["degraded","good"]-0.80)<1e-12)
+stopifnot(abs(base_transition[["none"]][["wet"]]["degraded","good"]-0.80)<1e-12)
 stopifnot(abs(base_transition[["none"]][["normal"]]["degraded","good"]-0.66)<1e-12)
 stopifnot(abs(base_transition[["none"]][["drought"]]["degraded","good"]-0.01)<1e-12)
-#Explicit rainy degraded-recovery anchors and CSV-shaped middle actions.
-stopifnot(abs(base_transition[["<200"]][["rainy"]]["degraded","good"]-0.50)<1e-12)
-stopifnot(abs(base_transition[[">600"]][["rainy"]]["degraded","good"]-0.01)<1e-12)
+#Explicit wet degraded-recovery anchors and CSV-shaped middle actions.
+stopifnot(abs(base_transition[["<200"]][["wet"]]["degraded","good"]-0.50)<1e-12)
+stopifnot(abs(base_transition[[">600"]][["wet"]]["degraded","good"]-0.01)<1e-12)
 stopifnot(
-  base_transition[["200-400"]][["rainy"]]["degraded","good"]<0.50,
-  base_transition[["200-400"]][["rainy"]]["degraded","good"]>
-    base_transition[["400-600"]][["rainy"]]["degraded","good"],
-  base_transition[["400-600"]][["rainy"]]["degraded","good"]>0.01
+  base_transition[["200-400"]][["wet"]]["degraded","good"]<0.50,
+  base_transition[["200-400"]][["wet"]]["degraded","good"]>
+    base_transition[["400-600"]][["wet"]]["degraded","good"],
+  base_transition[["400-600"]][["wet"]]["degraded","good"]>0.01
 )
 #With positive grazing, degraded recovery is prohibited under normal/drought.
 for(a in actions){
@@ -2181,27 +2182,62 @@ This function creates genuinely independent runs by resetting both:
 - all six Q tables.
 
 ```{r independent-replicates}
+get_parallel_workers<-function(max_workers=6L,reserve=2L){
+  available<-as.integer(future::availableCores())
+  as.integer(max(1L,min(max_workers,max(1L,available-reserve))))
+}
+
 run_independent_replicates<-function(
-    n_runs = 20L,
-    steps = 100L,
-    seed_start = 1000L
-) {
-  map_dfr(
+    n_runs=20L,
+    steps=250L,
+    seed_start=1000L,
+    workers=NULL
+){
+  if(!requireNamespace("future",quietly=TRUE)||
+     !requireNamespace("furrr",quietly=TRUE)){
+    stop(
+      "Parallel runs require packages 'future' and 'furrr'. ",
+      "Install once with install.packages(c('future','furrr'))."
+    )
+  }
+
+  if(is.null(workers)){
+    workers<-get_parallel_workers()
+  }
+  workers<-as.integer(max(1L,workers))
+  message("Running ",n_runs," independent simulations on ",workers," workers.")
+
+  future::plan(
+    future::multisession,
+    workers=workers
+  )
+  on.exit(
+    future::plan(future::sequential),
+    add=TRUE
+  )
+
+  furrr::future_map_dfr(
     seq_len(n_runs),
-    function(run_id) {
+    function(run_id){
       res<-simulate_marl(
-        steps = steps,
-        seed = seed_start + run_id
+        steps=steps,
+        seed=seed_start+run_id
       )
-      res$landscape_counts %>%
-        mutate(run = run_id)
-    }
+
+      res$landscape_counts%>%
+        mutate(run=run_id)
+    },
+    .options=furrr::furrr_options(
+      seed=TRUE,
+      scheduling=1
+    )
   )
 }
+
 replicate_degradation<-run_independent_replicates(
-  n_runs = 20,
-  steps = 100,
-  seed_start = 2000
+  n_runs=20L,
+  steps=250L,
+  seed_start=2000L
 )
 ```
 

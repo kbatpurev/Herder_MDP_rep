@@ -111,10 +111,7 @@ initial_actions<-c(A1="<200",A2="200-400",A3="200-400",A4="400-600",A5="400-600"
 #Direct herd income before survival adjustment
 herd_income<-c("<200"=0.8,"200-400"=2.0,"400-600"=2.5,">600"=3.5)
 #Outcome-based PES from absolute resulting EMA-defined rangeland condition
-state_pes<-c(intact=1.5,good=1.0,poor=0.4,degraded=0.0)
-#Reward weights
-income_weight<-0.50
-state_pes_weight<-0.50
+state_pes<-c(intact=1.5,good=1.4,poor=0,degraded=0.0)
 #Expected stock survival by current rangeland condition and stocking action
 stock_survival<-matrix(
   c(
@@ -127,8 +124,9 @@ stock_survival<-matrix(
   byrow=TRUE,
   dimnames=list(r_states,actions)
 )
-#Weather
+#Weather. This gets changed in the sensitivity test to different frequencies
 weather_prob<-c(drought=0.30,normal=0.50,wet=0.20)
+
 #Q-learning
 alpha<-0.20
 gamma<-0.95
@@ -157,7 +155,6 @@ stopifnot(abs(travel_cost_weight+social_cost_weight-1)<1e-12)
 stopifnot(identical(dim(stock_survival),c(4L,4L)))
 stopifnot(all(stock_survival>=0&stock_survival<=1))
 stopifnot(identical(names(state_pes),r_states))
-stopifnot(abs(income_weight+state_pes_weight-1)<1e-12)
 tibble(
   condition=r_states,
   state_pes=state_pes[r_states]
@@ -1311,21 +1308,16 @@ emergency\_cost\_scale\times emergency\_cost.
 get_stock_survival<-function(action,rangeland_condition){
   unname(stock_survival[rangeland_condition,action])
 }
-compute_reward<-function(
-    action,
-    rangeland_condition,
-    resulting_condition,
-    n_agents_same_cell=1L,
-    emergency_cost=0
-){
+
+compute_reward<-function(action,rangeland_condition,resulting_condition,n_agents_same_cell=1L,emergency_cost=0){
   survival_rate<-get_stock_survival(action=action,rangeland_condition=rangeland_condition)
   intended_herd_size<-unname(action_herd_size[[action]])
   expected_surviving_herd<-intended_herd_size*survival_rate
   expected_stock_loss<-intended_herd_size-expected_surviving_herd
   livestock_income<-herd_income[[action]]*survival_rate
   state_pes_reward<-unname(state_pes[[resulting_condition]])
-  income_component<-income_weight*livestock_income
-  state_component<-state_pes_weight*state_pes_reward
+  income_component<-livestock_income
+  state_component<-state_pes_reward
   gross_reward<-income_component+state_component
   interaction_multiplier<-colocation_multiplier^max(n_agents_same_cell-1L,0L)
   reward_after_interaction<-gross_reward*interaction_multiplier
@@ -2029,7 +2021,7 @@ This is one continuous learning trajectory. Q tables carry forward throughout th
 
 ```{r train-model}
 results_train<-simulate_marl(
-  steps = 500,
+  steps = 250,
   seed = 128
 )
 ```
@@ -2041,15 +2033,6 @@ results_train<-simulate_marl(
 Both count and percentage are retained. The count is especially informative for a 25-cell landscape.
 
 ```{r plot-degradation}
-p_degraded_count<-results_train$landscape_counts %>%
-  ggplot(aes(step, degraded)) +
-  geom_line() +
-  labs(
-    title = "Degraded cells through MARL training",
-    x = "Step",
-    y = "Number of degraded cells"
-  ) +
-  theme_minimal()
 p_degraded_pct<-results_train$landscape_counts %>%
   ggplot(aes(step, pct_degraded)) +
   geom_line() +
@@ -2059,7 +2042,6 @@ p_degraded_pct<-results_train$landscape_counts %>%
     y = "Degraded cells (%)"
   ) +
   theme_minimal()
-p_degraded_count
 p_degraded_pct
 ```
 
@@ -2070,7 +2052,7 @@ results_train$action_log %>%
   mutate(
     period = cut(
       step,
-      breaks = seq(0, 500, by = 50),
+      breaks = seq(0, 250, by = 50),
       include.lowest = TRUE
     )
   ) %>%
@@ -2212,27 +2194,62 @@ This function creates genuinely independent runs by resetting both:
 - all six Q tables.
 
 ```{r independent-replicates}
+get_parallel_workers<-function(max_workers=6L,reserve=2L){
+  available<-as.integer(future::availableCores())
+  as.integer(max(1L,min(max_workers,max(1L,available-reserve))))
+}
+
 run_independent_replicates<-function(
-    n_runs = 20L,
-    steps = 100L,
-    seed_start = 1000L
-) {
-  map_dfr(
+    n_runs=20L,
+    steps=250L,
+    seed_start=1000L,
+    workers=NULL
+){
+  if(!requireNamespace("future",quietly=TRUE)||
+     !requireNamespace("furrr",quietly=TRUE)){
+    stop(
+      "Parallel runs require packages 'future' and 'furrr'. ",
+      "Install once with install.packages(c('future','furrr'))."
+    )
+  }
+
+  if(is.null(workers)){
+    workers<-get_parallel_workers()
+  }
+  workers<-as.integer(max(1L,workers))
+  message("Running ",n_runs," independent simulations on ",workers," workers.")
+
+  future::plan(
+    future::multisession,
+    workers=workers
+  )
+  on.exit(
+    future::plan(future::sequential),
+    add=TRUE
+  )
+
+  furrr::future_map_dfr(
     seq_len(n_runs),
-    function(run_id) {
+    function(run_id){
       res<-simulate_marl(
-        steps = steps,
-        seed = seed_start + run_id
+        steps=steps,
+        seed=seed_start+run_id
       )
-      res$landscape_counts %>%
-        mutate(run = run_id)
-    }
+
+      res$landscape_counts%>%
+        mutate(run=run_id)
+    },
+    .options=furrr::furrr_options(
+      seed=TRUE,
+      scheduling=1
+    )
   )
 }
+
 replicate_degradation<-run_independent_replicates(
-  n_runs = 20,
-  steps = 100,
-  seed_start = 2000
+  n_runs=20L,
+  steps=250L,
+  seed_start=2000L
 )
 ```
 
@@ -2258,7 +2275,7 @@ replicate_degradation %>%
     linewidth = 1
   ) +
   labs(
-    title = "TEST: independent runs are separate learning/ecological realizations",
+    #title = "TEST: independent runs are separate learning/ecological realizations",
     y = "Number of degraded cells"
   ) +
   theme_minimal()
