@@ -311,9 +311,9 @@ scenario_grid<-tribble(
   #0.40,0.95,1.00,5L,
   #0.30,0.50,0.20,1.00,
 
-  #"low_gamma",
-  #0.20,0.50,1.00,5L,
-  #0.30,0.50,0.20,1.00,
+  "low_gamma",
+  0.20,0.50,1.00,5L,
+  0.30,0.50,0.20,1.00,
 
   #"high_tau",
   #0.20,0.95,2.00,5L,
@@ -339,7 +339,7 @@ scenario_grid<-tribble(
 parameter_map<-tribble(
   ~parameter,~variant_scenario,~variant_label,
   #"alpha","high_alpha","High alpha: 0.40",
-  #"gamma","low_gamma","Low gamma: 0.50",
+  "gamma","low_gamma","Low gamma: 0.50",
   #"tau","high_tau","High tau: 2.00",
   "memory_window","long_memory","Long memory: 10",
   "drought_probability_low","low_drought","Low drought: 0.15, normal: 0.50, wet: 0.35",
@@ -697,7 +697,7 @@ run_three_model_designs<-function(
 # stopifnot(n_distinct(comparison_test$landscape$run)==3)
 
 # ============================================================
-# 10. FULL RUN
+# 10. FULL RUN with time stamps
 # ============================================================
 
 N_RUNS<-10L
@@ -705,6 +705,12 @@ N_STEPS<-100L
 SEED_START<-50001L
 
 configure_parallel(N_WORKERS)
+
+SENSITIVITY_RUN_ID<-paste0("sens_",format(Sys.time(),"%Y%m%d_%H%M%S"))
+SENSITIVITY_RUN_ID
+
+SENSITIVITY_SPEC<-paste0(SENSITIVITY_RUN_ID,"_runs",N_RUNS,"_steps",N_STEPS,"_seed",SEED_START)
+SENSITIVITY_SPEC
 
 comparison_results<-tryCatch(
   run_three_model_designs(
@@ -716,7 +722,46 @@ comparison_results<-tryCatch(
   finally=shutdown_parallel()
 )
 
-c# ============================================================
+stamp_results<-function(x){
+  
+  x%>%
+    mutate(
+      sensitivity_run_id=
+        SENSITIVITY_RUN_ID,
+      sensitivity_run_spec=
+        SENSITIVITY_RUN_SPEC
+    )
+}
+
+comparison_results$landscape<-
+  stamp_results(
+    comparison_results$landscape
+  )
+
+comparison_results$actions<-
+  stamp_results(
+    comparison_results$actions
+  )
+
+comparison_results$cells<-
+  stamp_results(
+    comparison_results$cells
+  )
+
+if(!is.null(comparison_results$q)){
+  comparison_results$q<-
+    stamp_results(
+      comparison_results$q
+    )
+}
+
+comparison_results$sensitivity_run_id<-
+  SENSITIVITY_RUN_ID
+
+comparison_results$sensitivity_run_spec<-
+  SENSITIVITY_RUN_SPEC
+
+# ============================================================
 # 11. PARAMETER LOOKUP
 # ============================================================
 
@@ -884,8 +929,8 @@ plot_cell_degradation_comparison<-function(
 #Example:
 plot_cell_degradation_comparison(
  comparison_results,
- parameter_name="drought_probability",
- run_id=1
+ parameter_name="gamma",
+ run_id=10
 )
 
 # ============================================================
@@ -959,9 +1004,8 @@ parameter_degradation_plots
 # plot_cell_degradation_comparison(...)
 # plot_action_mix_comparison(...)
 #
-# ============================================================
 
-
+#====================================================================
 #Cumulative plots
 landscape_auc<-comparison_results$landscape%>%
   arrange(
@@ -971,6 +1015,8 @@ landscape_auc<-comparison_results$landscape%>%
     step
   )%>%
   group_by(
+    sensitivity_run_id,
+    sensitivity_spec,
     pes_design,
     scenario,
     run
@@ -988,6 +1034,18 @@ landscape_auc<-comparison_results$landscape%>%
     .groups="drop"
   )
 
+stopifnot(
+  n_distinct(
+    landscape_auc$sensitivity_run_id
+  )==1L
+)
+
+stopifnot(
+  unique(
+    landscape_auc$sensitivity_run_id
+  )==
+    comparison_results$sensitivity_run_id
+)
 scenario_order<-c(
   "baseline",
   "high_alpha",
