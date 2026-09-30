@@ -1,5 +1,5 @@
 ---
-title: "Herder Rangeland MARL — Q-learning, Outcome-based PES and Stock Survival"
+title: "Herder Rangeland MARL — MADDPG, No PES and Stock Survival"
 author: "Khorloo Batpurev"
 date: "`r Sys.Date()`"
 output:
@@ -9,21 +9,25 @@ output:
     number_sections: true
 ---
 
-#Multi-agent Reinforcement Learning for Outcome based PES design 
 
+> **Learning-algorithm conversion note.** This file preserves the original ecological transition table and all non-learning model rules from its source Rmd. The learning layer has been replaced by discrete-action MADDPG with one decentralised actor and one centralised critic per herder, masked straight-through Gumbel-Softmax action selection, joint replay memory, and Polyak target networks.
 
-Outcome based PES rewards the ecological state produced after a stocking decision. The action remains the chosen herd-size category, while the PES component is conditioned on the resulting EMA-defined rangeland condition. For action-based PES and no PES, there are separate Rmds. 
+# MARL for PES design
+
+There is no PES payment in this scenario; but agents still earn income from livestock. 
 
 This is a simplified version with 6 agents and 25cells(5x5). Each agent has 2 designated pastures that they switch between each iteration. In an emergency they are allowed to choose a third pasture,that is not a designated pasture of someone else's. Co-location has a 0.7 penalty, so there is incentive to avoid overlapping with other agents in the same cell(pasture). Because simulation would be expensive on a continuous herd size, the model for now has four stocking categories as actions.Agents can't change herd size dramatically between two iterations,and hence there is an adjacent-category constraint:an agent may stay in the same category or move by one category per iteration, but cannot jump directly from`<200`to`>600`or vice versa. There is a 5 year ecosystem memory with an exponential decay weight(last year's condition is the most influential on this year's). Information sharing is only for the purpose of estimating neighbourhood density, which then enables agents to avoid a co-location penalty. 
 
-Independent Q-learning algorithm assumptions: each agent has their own independent policy. Agents interact indirectly i.e. only through off-policy tables to estimate neighbourhood density. There is no centralised learning. 
+MADDPG assumptions: each herder has a decentralised actor that observes only its own local observation. Training uses one centralised critic per herder, each critic observing the joint observations and joint actions of all six agents. The four original stocking categories and the adjacent-category constraint are retained through a masked straight-through Gumbel-Softmax actor policy.
 
 ## Model definition
 
-The learning state for agent \(i\) at time \(t\) is
+The ecological environment, movement rules, stocking categories, action-based PES payments, stock-survival function, co-location penalty and emergency costs are unchanged from the source Q-learning version. Only the learning architecture is replaced.
+
+For each agent \(i\), the local observation is the same information used previously:
 
 \[
-s_{i,t} =
+o_{i,t} =
 (
 \text{current cell},
 \text{rangeland condition},
@@ -33,35 +37,57 @@ s_{i,t} =
 ).
 \]
 
-Each agent learns with
+The categorical components are one-hot encoded, so no information is added or removed relative to the previous state key.
+
+Each agent has its own actor network
 
 \[
-Q(s,a) \leftarrow Q(s,a) +
-\alpha
-\left[
-r +
-\gamma \max_{a'}Q(s',a')
--
-Q(s,a)
-\right].
+\pi_i(o_i;\theta_i)
 \]
 
-The behavioural policy is softmax over the actions that are feasible from the previous stocking category:
+which outputs four action logits. The same/adjacent stocking-category constraint is applied as a hard action mask. During training, a straight-through Gumbel-Softmax draw converts the masked logits to an approximately differentiable one-hot action:
 
 \[
-\pi(a|s)
+y_{i,k}
 =
-\operatorname{softmax}
-\left(
-Q(s,a)/\tau
-\right),
-\qquad a \in \mathcal{A}(a_{t-1}).
+\frac{
+\exp((z_{i,k}+g_{i,k})/\tau_G)
+}{
+\sum_j \exp((z_{i,j}+g_{i,j})/\tau_G)
+},
 \]
 
-Direct livestock income is adjusted by expected stock survival indexed by current rangeland condition and stocking action. Stock survival affects current reward only in this baseline; surviving herd size is logged but not carried forward. 
+with infeasible actions masked before the softmax. The realised landscape simulation always receives one of the four original discrete stocking categories.
 
-##  Spatial rules
+Training is centralised and execution is decentralised. Agent \(i\)'s critic receives all agents' observations and actions:
 
+\[
+Q_i(o_1,\ldots,o_N,a_1,\ldots,a_N;\phi_i),
+\]
+
+while the actor continues to use only \(o_i\). Critic targets are
+
+\[
+y_i =
+r_i +
+\gamma(1-d)
+Q_i^{\mathrm{target}}
+(o'_1,\ldots,o'_N,a'_1,\ldots,a'_N).
+\]
+
+Actor \(i\) is updated to maximise its centralised critic,
+
+\[
+J_i(\theta_i)
+=
+E[
+Q_i(o_1,\ldots,o_N,a_1,\ldots,\pi_i(o_i),\ldots,a_N)
+].
+\]
+
+Experience is stored in a joint replay buffer and sampled in mini-batches. Target actor and critic networks are updated by Polyak averaging. Direct livestock income is still adjusted by expected stock survival and the action-based PES reward equation is unchanged.
+
+## Spatial rules
 
 - There are six agents and 25 cells.
 - Each agent has two unique designated cells.
@@ -87,13 +113,16 @@ All agents observe a shared public ledger containing the current locations and c
 
 Every cell carries its own persistent 5-step exponential moving average (EMA) of ecological degradation severity. The stochastic ecological signal is drawn from the CSV-derived transition kernel in Step 5, which now permits constrained recovery as well as deterioration. This includes unassigned cells: if an emergency herder grazed a cell several iterations earlier, that legacy remains in the cell EMA and fades exponentially rather than being reset when the cell is ungrazed. The newest transition outcome receives the largest weight. The EMA defines the categorical `rangeland_condition` observed by agents. If one simulation step represents one year, this is approximately a five-year ecological memory; if one step represents a season, it is a five-season memory.
 
-#1. Setup
+
+# . Setup
 
 ```{r setup}
 library(tidyverse)
 library(purrr)
 library(ggplot2)
+library(torch)
 set.seed(128)
+torch_manual_seed(128)
 #Grid
 grid_nx<-5L
 grid_ny<-5L
@@ -102,16 +131,16 @@ r_states<-c("intact","good","poor","degraded")
 degradation_score<-c(intact=0,good=1,poor=2,degraded=3)
 #Four discrete stocking-rate actions
 actions<-c("<200","200-400","400-600",">600")
-#"none" is an ecological pressure category only
+#"none" is when there is no grazing in the cell
 ecological_footprints<-c("none",actions)
 #Representative herd size used for information sharing and combined pressure
 action_herd_size<-c("<200"=100,"200-400"=300,"400-600"=500,">600"=700)
-#Starting stocking categories are placeholders
+#Starting stocking categories as placeholders
 initial_actions<-c(A1="<200",A2="200-400",A3="200-400",A4="400-600",A5="400-600",A6=">600")
 #Direct herd income before survival adjustment
 herd_income<-c("<200"=0.8,"200-400"=2.0,"400-600"=2.5,">600"=3.5)
-#Outcome-based PES from absolute resulting EMA-defined rangeland condition
-state_pes<-c(intact=4,good=3,poor=0,degraded=0)
+#Action-based PES
+pes_payment<-0
 #Expected stock survival by current rangeland condition and stocking action
 stock_survival<-matrix(
   c(
@@ -127,11 +156,19 @@ stock_survival<-matrix(
 #Weather. This gets changed in the sensitivity test to different frequencies
 weather_prob<-c(drought=0.30,normal=0.50,wet=0.20)
 
-#Q-learning
-alpha<-0.20
+#MADDPG hyperparameters
 gamma<-0.95
-tau<-1.00
-#Interaction penalty
+actor_lr<-1e-3
+critic_lr<-2e-3
+gumbel_tau<-1.00
+target_tau<-0.01
+batch_size<-64L
+replay_capacity<-50000L
+learning_starts<-64L
+updates_per_step<-1L
+actor_hidden_dim<-128L
+critic_hidden_dim<-256L
+#Co-location penalty
 colocation_multiplier<-0.70
 #Emergency movement costs
 travel_cost_weight<-0.50
@@ -147,25 +184,34 @@ stopifnot(length(actions)==4)
 stopifnot(identical(ecological_footprints,c("none",actions)))
 stopifnot(all(initial_actions%in%actions))
 stopifnot(abs(sum(weather_prob)-1)<1e-12)
-stopifnot(alpha>0&&alpha<=1)
 stopifnot(gamma>=0&&gamma<1)
-stopifnot(tau>0)
+stopifnot(actor_lr>0)
+stopifnot(critic_lr>0)
+stopifnot(gumbel_tau>0)
+stopifnot(target_tau>0&&target_tau<=1)
+stopifnot(batch_size>=1)
+stopifnot(replay_capacity>=batch_size)
+stopifnot(learning_starts>=batch_size)
 stopifnot(ema_alpha>0&&ema_alpha<1)
 stopifnot(abs(travel_cost_weight+social_cost_weight-1)<1e-12)
 stopifnot(identical(dim(stock_survival),c(4L,4L)))
 stopifnot(all(stock_survival>=0&stock_survival<=1))
-stopifnot(identical(names(state_pes),r_states))
+
 tibble(
-  condition=r_states,
-  state_pes=state_pes[r_states]
+  action=actions,
+  herd_income=herd_income[actions],
+  survival_intact=stock_survival["intact",actions],
+  expected_livestock_income=herd_income[actions]*stock_survival["intact",actions],
+  pes_payment=pes_payment[actions],
+  total_on_intact=herd_income[actions]*stock_survival["intact",actions]+pes_payment[actions]
 )
 ```
 
-#2. Create the 5 × 5 landscape
+# . Create the 5 × 5 landscape
 
 Cells are indexed from 1 to 25. All cells begin intact.
 
-```{r create-grid}
+```{r create-grid, include=FALSE}
 make_land_grid<-function() {
   expand_grid(
     y = 0:(grid_ny - 1),
@@ -194,9 +240,9 @@ ggplot(land_grid_initial, aes(x, y, label = cell_id)) +
   theme_minimal()
 ```
 
-#3. Assign two designated cells to each of six agents
+# . Assign two designated cells to each of six agents
 
-The 12 designated cells are unique. This means normal movement does not create accidental overlap simply because two agents own the same designated cell.
+The 12 designated cells are mutually exclusive for each agent. 
 
 ```{r designated-cells}
 designated_cells<-tribble(
@@ -248,7 +294,7 @@ land_grid_initial %>%
   theme_minimal()
 ```
 
-#4. Weather
+# . Weather
 
 Weather is exogenous and shared by the whole landscape at each time step.
 
@@ -288,7 +334,7 @@ weather_test %>%
   theme_minimal()
 ```
 
-#5. Expert derived ecological transition model
+# . Expert derived ecological transition model
 
 
 The expert derived transition table contains joint relationship between climate, stocking category, and three pasture outcomes; `intact`,`good`,`degraded`. There is no directly elicited `poor` state. We derive `poor` state by applying the exponential moving average (EMA) function, which produces a continuous number between 0 and 3. `poor` is assigned for values between 1.5 and 2.5. 
@@ -451,73 +497,9 @@ sample_next_condition<-function(current_condition,action,weather){
 }
 ```
 
-```{r test-base-transition, include=FALSE}
-stopifnot(exists("base_transition"),is.list(base_transition))
-stopifnot(identical(names(base_transition),ecological_footprints))
-stopifnot(all(abs(climate_transition_source$intact+climate_transition_source$good+climate_transition_source$degraded-1)<1e-10))
-for(a in ecological_footprints){
-  for(w in names(weather_prob)){
-    M<-base_transition[[a]][[w]]
-    stopifnot(is.matrix(M),identical(dim(M),c(4L,4L)))
-    stopifnot(identical(rownames(M),r_states),identical(colnames(M),r_states))
-    stopifnot(all(is.finite(M)),all(M>=0&M<=1),all(abs(rowSums(M)-1)<1e-10))
-    #Poor is an EMA-only persistent state, never a directly sampled signal.
-    stopifnot(all(M[,"poor"]==0))
-    #Poor/degraded cannot jump directly to an intact signal.
-    stopifnot(M["poor","intact"]==0,M["degraded","intact"]==0)
-    #Good is the agreed 2/3 intact + 1/3 degraded interpolation.
-    stopifnot(max(abs(M["good",]-(2/3*M["intact",]+1/3*M["degraded",])))<1e-10)
-    #Poor starts from 1/3 good + 2/3 degraded, then intact mass moves to good.
-    poor_raw<-1/3*M["good",]+2/3*M["degraded",]
-    poor_expected<-poor_raw
-    poor_expected["good"]<-poor_expected["good"]+poor_expected["intact"]
-    poor_expected["intact"]<-0
-    stopifnot(max(abs(M["poor",]-poor_expected))<1e-10)
-  }
-}
-#The four grazed intact-start rows reproduce the embedded CSV exactly.
-for(i in seq_len(nrow(climate_transition_source))){
-  row<-climate_transition_source[i,]
-  expected<-make_prob_vector(row$intact,row$good,row$degraded)
-  observed<-base_transition[[row$action]][[row$weather]]["intact",]
-  stopifnot(max(abs(expected-observed))<1e-10)
-}
-#Explicit no-grazing anchors.
-stopifnot(abs(base_transition[["none"]][["rainy"]]["intact","intact"]-0.99)<1e-12)
-stopifnot(abs(base_transition[["none"]][["normal"]]["intact","intact"]-0.99)<1e-12)
-stopifnot(abs(base_transition[["none"]][["drought"]]["intact","intact"]-0.01)<1e-12)
-stopifnot(abs(base_transition[["none"]][["rainy"]]["degraded","good"]-0.80)<1e-12)
-stopifnot(abs(base_transition[["none"]][["normal"]]["degraded","good"]-0.66)<1e-12)
-stopifnot(abs(base_transition[["none"]][["drought"]]["degraded","good"]-0.01)<1e-12)
-#Explicit rainy degraded-recovery anchors and CSV-shaped middle actions.
-stopifnot(abs(base_transition[["<200"]][["rainy"]]["degraded","good"]-0.50)<1e-12)
-stopifnot(abs(base_transition[[">600"]][["rainy"]]["degraded","good"]-0.01)<1e-12)
-stopifnot(
-  base_transition[["200-400"]][["rainy"]]["degraded","good"]<0.50,
-  base_transition[["200-400"]][["rainy"]]["degraded","good"]>
-    base_transition[["400-600"]][["rainy"]]["degraded","good"],
-  base_transition[["400-600"]][["rainy"]]["degraded","good"]>0.01
-)
-#With positive grazing, degraded recovery is prohibited under normal/drought.
-for(a in actions){
-  stopifnot(base_transition[[a]][["normal"]]["degraded","degraded"]==1)
-  stopifnot(base_transition[[a]][["drought"]]["degraded","degraded"]==1)
-}
-#Compact inspectable table for all 15 matrices.
-transition_probability_table<-map_dfr(ecological_footprints,function(a){
-  map_dfr(names(weather_prob),function(w){
-    M<-base_transition[[a]][[w]]
-    as.data.frame(as.table(M))%>%
-      setNames(c("current_condition","transition_signal","probability"))%>%
-      mutate(action=a,weather=w,.before=1)
-  })
-})
-stopifnot(nrow(transition_probability_table)==5*3*4*4)
-```
+# . Five-step ecosystem memory
 
-#6. Five-step ecosystem memory
-
-This is **cell-level ecological memory**, not agent reward/spatial memory. Every one of the 25 cells stores its own persistent EMA, including cells that are currently ungrazed or unassigned.
+This is **cell-level ecological memory**. Every one of the 25 cells stores its own persistent EMA, including cells that are currently ungrazed or unassigned.
 
 For the ecological update to time \(t+1\), first draw a stochastic transition outcome \(z_{t+1}\) from the base transition using \(C_t\), \(A_t\), and \(W_{t+1}\). Then update the cell EMA:
 
@@ -527,7 +509,7 @@ E_{t+1} =
 (1-\alpha_E)E_t.
 \]
 
-The newest outcome receives weight \(\alpha_E\); older ecological history decays geometrically. The categorical `rangeland_condition` observed by the agents is then defined from the EMA thresholds. Thus EMA is not a sixth Q-learning state component; it is the mechanism that defines the rangeland-condition component already present in \(s\).
+The newest outcome receives weight \(\alpha_E\); older ecological history decays geometrically. The categorical `rangeland_condition` observed by the agents is then defined from the EMA thresholds. This is the mechanism that defines the rangeland-condition component already present in \(s\).
 
 ```{r ecosystem-memory}
 condition_from_ema<-function(x){
@@ -559,100 +541,169 @@ stopifnot(abs(ema_alpha-1/3)<1e-12)
 memory_test
 ```
 
-#7. Agent objects and Q tables
+# . Agent objects, neural networks and replay memory
 
-Each agent has its own Q table. All agents start with the same learning parameters in this basic version.
+Each agent retains its ecological and livestock state as before. Each agent now has its own actor and centralised critic; target networks and a joint replay buffer are used for MADDPG training.
 
 ```{r create-agents}
-empty_q_table<-function() {
-  matrix(
-    numeric(0),
-    nrow = 0,
-    ncol = length(actions),
-    dimnames = list(
-      character(0),
-      actions
-    )
-  )
-}
 create_agent<-function(
     agent_id,
-    initial_action = initial_actions[[agent_id]],
-    alpha_value = alpha,
-    gamma_value = gamma,
-    tau_value = tau
-) {
-  stopifnot(initial_action %in% actions)
-  first_cell<-designated_lookup %>%
-    filter(.data$agent_id==.env$agent_id) %>%
+    initial_action=initial_actions[[agent_id]]
+){
+  stopifnot(initial_action%in%actions)
+
+  first_cell<-designated_lookup%>%
+    filter(.data$agent_id==.env$agent_id)%>%
     pull(cell_1)
+
   list(
-    id = agent_id,
-    alpha = alpha_value,
-    gamma = gamma_value,
-    tau = tau_value,
-    current_cell = first_cell,
-    previous_action = initial_action,
-    herd_size = unname(action_herd_size[[initial_action]]),
-    Q = empty_q_table()
+    id=agent_id,
+    current_cell=first_cell,
+    previous_action=initial_action,
+    herd_size=unname(action_herd_size[[initial_action]])
   )
 }
+
 agents_initial<-setNames(
   lapply(
     names(initial_actions),
-    function(id) {
+    function(id){
       create_agent(
-        agent_id = id,
-        initial_action = initial_actions[[id]]
+        agent_id=id,
+        initial_action=initial_actions[[id]]
       )
     }
   ),
   names(initial_actions)
 )
-ensure_q_state<-function(agent, state_key) {
-  if (!state_key %in% rownames(agent$Q)) {
-    new_row<-matrix(
-      0,
-      nrow = 1,
-      ncol = length(actions),
-      dimnames = list(
-        state_key,
-        actions
-      )
+
+actor_network<-nn_module(
+  "ActorNetwork",
+  initialize=function(obs_dim,action_dim,hidden_dim=128L){
+    self$net<-nn_sequential(
+      nn_linear(obs_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,action_dim)
     )
-    agent$Q<-rbind(agent$Q, new_row)
+  },
+  forward=function(x){
+    self$net(x)
   }
-  agent
+)
+
+critic_network<-nn_module(
+  "CentralisedCritic",
+  initialize=function(joint_obs_dim,joint_action_dim,hidden_dim=256L){
+    self$net<-nn_sequential(
+      nn_linear(joint_obs_dim+joint_action_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,1L)
+    )
+  },
+  forward=function(joint_obs,joint_action){
+    self$net(torch_cat(list(joint_obs,joint_action),dim=2))
+  }
+)
+
+copy_module_state<-function(target,source){
+  target$load_state_dict(source$state_dict())
+  invisible(target)
+}
+
+new_replay_buffer<-function(capacity=replay_capacity){
+  buffer<-new.env(parent=emptyenv())
+  buffer$capacity<-as.integer(capacity)
+  buffer$size<-0L
+  buffer$position<-1L
+  buffer$obs<-vector("list",buffer$capacity)
+  buffer$actions<-vector("list",buffer$capacity)
+  buffer$rewards<-vector("list",buffer$capacity)
+  buffer$next_obs<-vector("list",buffer$capacity)
+  buffer$masks<-vector("list",buffer$capacity)
+  buffer$next_masks<-vector("list",buffer$capacity)
+  buffer$done<-vector("list",buffer$capacity)
+  buffer
+}
+
+replay_add<-function(
+    buffer,
+    obs,
+    action_onehot,
+    rewards,
+    next_obs,
+    masks,
+    next_masks,
+    done=0
+){
+  i<-buffer$position
+
+  buffer$obs[[i]]<-as.vector(t(obs))
+  buffer$actions[[i]]<-as.vector(t(action_onehot))
+  buffer$rewards[[i]]<-as.numeric(rewards)
+  buffer$next_obs[[i]]<-as.vector(t(next_obs))
+  buffer$masks[[i]]<-as.vector(t(masks))
+  buffer$next_masks[[i]]<-as.vector(t(next_masks))
+  buffer$done[[i]]<-as.numeric(done)
+
+  buffer$size<-min(buffer$size+1L,buffer$capacity)
+  buffer$position<-if(i>=buffer$capacity)1L else i+1L
+
+  invisible(buffer)
+}
+
+replay_sample<-function(buffer,n=batch_size){
+  stopifnot(buffer$size>=n)
+  idx<-sample.int(buffer$size,n,replace=FALSE)
+
+  stack_field<-function(field){
+    do.call(
+      rbind,
+      lapply(idx,function(i)buffer[[field]][[i]])
+    )
+  }
+
+  list(
+    obs=stack_field("obs"),
+    actions=stack_field("actions"),
+    rewards=stack_field("rewards"),
+    next_obs=stack_field("next_obs"),
+    masks=stack_field("masks"),
+    next_masks=stack_field("next_masks"),
+    done=matrix(
+      unlist(lapply(idx,function(i)buffer$done[[i]])),
+      ncol=1
+    )
+  )
 }
 ```
 
 ```{r test-agents, include=FALSE}
-stopifnot(length(agents_initial) == 6)
-stopifnot(all(vapply(agents_initial, is.list, logical(1))))
+stopifnot(length(agents_initial)==6)
+stopifnot(all(vapply(agents_initial,is.list,logical(1))))
 stopifnot(all(
   vapply(
     agents_initial,
-    function(a) identical(colnames(a$Q), actions),
+    function(a)a$previous_action%in%actions,
     logical(1)
   )
 ))
 stopifnot(all(
   vapply(
     agents_initial,
-    function(a) a$previous_action %in% actions,
+    function(a)a$herd_size>0,
     logical(1)
   )
 ))
-stopifnot(all(
-  vapply(
-    agents_initial,
-    function(a) a$herd_size > 0,
-    logical(1)
-  )
-))
+
+replay_test<-new_replay_buffer(10L)
+stopifnot(replay_test$size==0L)
 ```
 
-#8. Shared information for neighbourhood density estimation
+# . Shared information for neighbourhood density estimation
 
 The public information ledger contains:
 
@@ -662,7 +713,7 @@ The public information ledger contains:
 - previous action;
 - current herd size.
 
-Neighbour density is the number of **other** agents in the Moore neighbourhood of the focal agent (one-cell radius in x and y).
+Neighbour density is the number of **other** agents in the neighbourhood of the focal agent (one-cell radius in x and y).
 
 ```{r information-sharing}
 share_agent_information<-function(
@@ -733,7 +784,7 @@ ggplot(
   theme_minimal()
 ```
 
-#9. Q-learning state encoding
+# . Local observation encoding
 
 The exact state requested for policy learning is
 
@@ -754,35 +805,184 @@ encode_state<-function(
     weather,
     neighbour_density,
     previous_action
-) {
+){
   paste(
-    paste0("cell=", current_cell),
-    paste0("land=", rangeland_condition),
-    paste0("weather=", weather),
-    paste0("neigh=", neighbour_density),
-    paste0("prev=", previous_action),
-    sep = "|"
+    paste0("cell=",current_cell),
+    paste0("land=",rangeland_condition),
+    paste0("weather=",weather),
+    paste0("neigh=",neighbour_density),
+    paste0("prev=",previous_action),
+    sep="|"
   )
 }
+
+one_hot_numeric<-function(value,levels){
+  as.numeric(levels==value)
+}
+
+observation_dim<-
+  grid_nx*grid_ny+
+  length(r_states)+
+  length(weather_prob)+
+  6L+
+  length(actions)
+
+encode_observation<-function(
+    current_cell,
+    rangeland_condition,
+    weather,
+    neighbour_density,
+    previous_action
+){
+  c(
+    one_hot_numeric(current_cell,seq_len(grid_nx*grid_ny)),
+    one_hot_numeric(rangeland_condition,r_states),
+    one_hot_numeric(weather,names(weather_prob)),
+    one_hot_numeric(neighbour_density,0:5),
+    one_hot_numeric(previous_action,actions)
+  )
+}
+
 observe_agent_state<-function(
     agent,
     land_grid,
     weather,
     shared_info
-) {
-  current_condition<-land_grid %>%
-    filter(cell_id == agent$current_cell) %>%
+){
+  current_condition<-land_grid%>%
+    filter(cell_id==agent$current_cell)%>%
     pull(rangeland_condition)
+
   neighbour_density<-compute_neighbour_density(
-    agent_id = agent$id,
-    shared_info = shared_info
+    agent_id=agent$id,
+    shared_info=shared_info
   )
+
   encode_state(
-    current_cell = agent$current_cell,
-    rangeland_condition = current_condition,
-    weather = weather,
-    neighbour_density = neighbour_density,
-    previous_action = agent$previous_action
+    current_cell=agent$current_cell,
+    rangeland_condition=current_condition,
+    weather=weather,
+    neighbour_density=neighbour_density,
+    previous_action=agent$previous_action
+  )
+}
+
+observe_agent_vector<-function(
+    agent,
+    land_grid,
+    weather,
+    shared_info
+){
+  current_condition<-land_grid%>%
+    filter(cell_id==agent$current_cell)%>%
+    pull(rangeland_condition)
+
+  neighbour_density<-compute_neighbour_density(
+    agent_id=agent$id,
+    shared_info=shared_info
+  )
+
+  encode_observation(
+    current_cell=agent$current_cell,
+    rangeland_condition=current_condition,
+    weather=weather,
+    neighbour_density=neighbour_density,
+    previous_action=agent$previous_action
+  )
+}
+
+create_maddpg_system<-function(agent_ids=names(initial_actions)){
+  n_agents<-length(agent_ids)
+  action_dim<-length(actions)
+
+  joint_obs_dim<-n_agents*observation_dim
+  joint_action_dim<-n_agents*action_dim
+
+  actors<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        actor_network(
+          obs_dim=observation_dim,
+          action_dim=action_dim,
+          hidden_dim=actor_hidden_dim
+        )
+      }
+    ),
+    agent_ids
+  )
+
+  target_actors<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        m<-actor_network(
+          obs_dim=observation_dim,
+          action_dim=action_dim,
+          hidden_dim=actor_hidden_dim
+        )
+        copy_module_state(m,actors[[id]])
+        m
+      }
+    ),
+    agent_ids
+  )
+
+  critics<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        critic_network(
+          joint_obs_dim=joint_obs_dim,
+          joint_action_dim=joint_action_dim,
+          hidden_dim=critic_hidden_dim
+        )
+      }
+    ),
+    agent_ids
+  )
+
+  target_critics<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        m<-critic_network(
+          joint_obs_dim=joint_obs_dim,
+          joint_action_dim=joint_action_dim,
+          hidden_dim=critic_hidden_dim
+        )
+        copy_module_state(m,critics[[id]])
+        m
+      }
+    ),
+    agent_ids
+  )
+
+  actor_optimizers<-setNames(
+    lapply(
+      actors,
+      function(m)optim_adam(m$parameters,lr=actor_lr)
+    ),
+    agent_ids
+  )
+
+  critic_optimizers<-setNames(
+    lapply(
+      critics,
+      function(m)optim_adam(m$parameters,lr=critic_lr)
+    ),
+    agent_ids
+  )
+
+  list(
+    agent_ids=agent_ids,
+    actors=actors,
+    target_actors=target_actors,
+    critics=critics,
+    target_critics=target_critics,
+    actor_optimizers=actor_optimizers,
+    critic_optimizers=critic_optimizers,
+    updates=0L
   )
 }
 ```
@@ -791,107 +991,162 @@ observe_agent_state<-function(
 state_test<-map_chr(
   agents_initial,
   observe_agent_state,
-  land_grid = land_grid_initial,
-  weather = "normal",
-  shared_info = shared_test
+  land_grid=land_grid_initial,
+  weather="normal",
+  shared_info=shared_test
 )
-stopifnot(length(state_test) == 6)
-stopifnot(all(str_detect(state_test, "cell=")))
-stopifnot(all(str_detect(state_test, "land=")))
-stopifnot(all(str_detect(state_test, "weather=")))
-stopifnot(all(str_detect(state_test, "neigh=")))
-stopifnot(all(str_detect(state_test, "prev=")))
-tibble(
-  agent = names(state_test),
-  state = state_test
+
+obs_test<-map(
+  agents_initial,
+  observe_agent_vector,
+  land_grid=land_grid_initial,
+  weather="normal",
+  shared_info=shared_test
 )
+
+stopifnot(length(state_test)==6)
+stopifnot(all(str_detect(state_test,"cell=")))
+stopifnot(all(str_detect(state_test,"land=")))
+stopifnot(all(str_detect(state_test,"weather=")))
+stopifnot(all(str_detect(state_test,"neigh=")))
+stopifnot(all(str_detect(state_test,"prev=")))
+stopifnot(all(map_int(obs_test,length)==observation_dim))
+stopifnot(all(map_dbl(obs_test,sum)==5))
+
+maddpg_test<-create_maddpg_system()
+stopifnot(length(maddpg_test$actors)==6)
+stopifnot(length(maddpg_test$critics)==6)
 ```
 
-# 10. Softmax policy with stocking-category anchoring
+# . Gumbel-Softmax actor with stocking-category anchoring
 
-Action choice is based only on Q values for the currently observed state, but the feasible action set is constrained by the previous stocking category. The agent may stay in the same category or move one category up/down in one iteration. This is the discrete approximation to the intended short-run stocking-change constraint. There is no extra action bias and no agent reward-memory term.
+Action choice is based only on Q values for the currently observed state, but the feasible action set is constrained by the previous stocking category. The agent may stay in the same category or move one category up/down in one iteration. This is the discrete approximation to the stocking-change constraint. 
 
-```{r softmax-policy}
-#Discrete analogue of a <=10% stocking-change anchor:
-#an agent may stay in the same category or move only one category up/down.
-allowed_actions<-function(previous_action) {
+```{r gumbel-policy}
+allowed_actions<-function(previous_action){
   switch(
     previous_action,
-    "<200" = c("<200", "200-400"),
-    "200-400" = c(
-      "<200",
-      "200-400",
-      "400-600"
-    ),
-    "400-600" = c(
-      "200-400",
-      "400-600",
-      ">600"
-    ),
-    ">600" = c("400-600", ">600"),
-    stop("Unknown previous action: ", previous_action)
+    "<200"=c("<200","200-400"),
+    "200-400"=c("<200","200-400","400-600"),
+    "400-600"=c("200-400","400-600",">600"),
+    ">600"=c("400-600",">600"),
+    stop("Unknown previous action: ",previous_action)
   )
 }
-softmax<-function(q_values, tau = 1) {
-  stopifnot(tau > 0)
-  z<-(q_values - max(q_values)) / tau
-  exp_z<-exp(z)
-  exp_z / sum(exp_z)
+
+action_mask<-function(previous_action){
+  as.numeric(actions%in%allowed_actions(previous_action))
 }
-select_action_q<-function(agent, state_key) {
-  agent<-ensure_q_state(agent, state_key)
-  feasible_actions<-allowed_actions(
-    agent$previous_action
+
+mask_logits_tensor<-function(logits,mask_tensor){
+  logits+(1-mask_tensor)*(-1e9)
+}
+
+select_action_actor<-function(
+    actor,
+    observation,
+    previous_action,
+    explore=TRUE,
+    temperature=gumbel_tau
+){
+  stopifnot(length(observation)==observation_dim)
+  stopifnot(previous_action%in%actions)
+
+  obs_tensor<-torch_tensor(
+    matrix(observation,nrow=1),
+    dtype=torch_float()
   )
-  q_values<-agent$Q[
-    state_key,
-    feasible_actions,
-    drop = TRUE
-  ]
-  probabilities<-softmax(
-    q_values,
-    tau = agent$tau
+
+  mask_vec<-action_mask(previous_action)
+
+  mask_tensor<-torch_tensor(
+    matrix(mask_vec,nrow=1),
+    dtype=torch_float()
   )
-  chosen_action<-sample(
-    feasible_actions,
-    size = 1,
-    prob = probabilities
+
+  actor$eval()
+
+  out<-with_no_grad({
+    logits<-actor(obs_tensor)
+    masked_logits<-mask_logits_tensor(logits,mask_tensor)
+    probabilities<-nnf_softmax(masked_logits,dim=2)
+
+    selected<-if(explore){
+      nnf_gumbel_softmax(
+        masked_logits,
+        tau=temperature,
+        hard=TRUE,
+        dim=2
+      )
+    }else{
+      probabilities
+    }
+
+    list(
+      probabilities=probabilities,
+      selected=selected
+    )
+  })
+
+  probability_vector<-as.numeric(
+    as_array(out$probabilities$cpu())
   )
-  #Keep a full action probability vector for diagnostics.
+
+  selected_vector<-as.numeric(
+    as_array(out$selected$cpu())
+  )
+
+  chosen_index<-which.max(selected_vector)
+  chosen_action<-actions[[chosen_index]]
+
+  hard_one_hot<-rep(0,length(actions))
+  hard_one_hot[[chosen_index]]<-1
+
   full_probabilities<-setNames(
-    rep(0, length(actions)),
+    probability_vector,
     actions
   )
-  full_probabilities[feasible_actions]<-probabilities
+
   list(
-    agent = agent,
-    action = chosen_action,
-    feasible_actions = feasible_actions,
-    probabilities = full_probabilities,
-    q_values = q_values
+    action=chosen_action,
+    action_index=chosen_index,
+    one_hot=hard_one_hot,
+    feasible_actions=allowed_actions(previous_action),
+    probabilities=full_probabilities
   )
 }
 ```
 
-```{r test-softmax-policy, include=FALSE}
+```{r test-gumbel-policy, include=FALSE}
 stopifnot(identical(
   allowed_actions("<200"),
-  c("<200", "200-400")
+  c("<200","200-400")
 ))
-stopifnot(!">600" %in% allowed_actions("<200"))
-stopifnot(!"<200" %in% allowed_actions(">600"))
-#Make an unavailable action artificially attractive and verify that it
-#still receives zero selection probability.
-policy_agent<-create_agent("A1", initial_action = "<200")
-policy_agent<-ensure_q_state(policy_agent, "demo")
-policy_agent$Q["demo", ]<-c(0, 1, 10, 20)
-policy_result<-select_action_q(policy_agent, "demo")
-stopifnot(policy_result$probabilities["400-600"] == 0)
-stopifnot(policy_result$probabilities[">600"] == 0)
-stopifnot(policy_result$action %in% c("<200", "200-400"))
+stopifnot(!">600"%in%allowed_actions("<200"))
+stopifnot(!"<200"%in%allowed_actions(">600"))
+
+torch_manual_seed(99)
+policy_system_test<-create_maddpg_system()
+policy_obs_test<-observe_agent_vector(
+  agents_initial$A1,
+  land_grid_initial,
+  "normal",
+  shared_test
+)
+
+policy_result_test<-select_action_actor(
+  actor=policy_system_test$actors$A1,
+  observation=policy_obs_test,
+  previous_action="<200",
+  explore=TRUE
+)
+
+stopifnot(policy_result_test$action%in%c("<200","200-400"))
+stopifnot(policy_result_test$probabilities[[">600"]]<1e-8)
+stopifnot(abs(sum(policy_result_test$probabilities)-1)<1e-6)
 ```
 
-# 11. Normal movement between two designated cells
+# . Normal movement between two designated cells
 
 Normal location is deterministic: agents alternate between their two designated cells.
 
@@ -932,7 +1187,7 @@ expand_grid(
   theme_minimal()
 ```
 
-# 12. Emergency trigger and emergency destination
+# . Emergency trigger and emergency destination
 
 The emergency gate is intentionally simple:
 
@@ -951,7 +1206,7 @@ C_{i,2} = \text{degraded}
 
 There is no stochastic mobility propensity in this basic version.
 
-##12.1 Straight-line route through the grid
+## .1 Straight-line route through the grid
 
 The route approximation is used only to calculate social trespass cost.
 
@@ -1002,13 +1257,9 @@ land_grid_initial %>%
   theme_minimal()
 ```
 
-##12.2 Travel and social costs
+## .2 Travel and social costs
 
-Travel cost is normalized Euclidean distance.
-
-Social cost is the fraction of intermediate route cells that are designated to **another** agent.
-
-The destination itself must be unassigned, so social cost comes from crossing other people's pastures rather than occupying their designated destination.
+Travel cost is normalized Euclidean distance.Social cost is the fraction of intermediate route cells that are designated to **another** agent. The destination itself must be unassigned, so social cost comes from crossing other people's pastures rather than occupying their designated destination.
 
 ```{r emergency-cost}
 emergency_movement_cost<-function(
@@ -1096,12 +1347,12 @@ cost_test %>%
   theme_minimal()
 ```
 
-##12.3 Emergency candidate set
+## .3 Emergency candidate set
 
-An emergency destination must:
+An emergency destination must be:
 
-- be unassigned;
-- be better than both designated cells;
+- be unassigned cell that is not a designated cell for another agent;
+- be better than both of the agent's own designated cells;
 - therefore be non-degraded when both designated cells are degraded.
 
 Among valid candidates, the basic version chooses the cell with the lowest combined emergency cost.
@@ -1280,54 +1531,38 @@ land_grid_initial %>%
   theme_minimal()
 ```
 
-#13. Outcome-based PES reward
+# . Action-based PES reward
 
-This is the only substantive change from the action-based PES model.
+Immediate reward contains:
 
-Livestock income is still determined by the chosen stocking action and expected stock survival under the current rangeland condition \(C_t\). PES is instead conditioned on the resulting EMA-defined rangeland condition \(C_{t+1}\) of the cell grazed at time \(t\).
+1. herd income multiplied by expected stock survival for the current rangeland condition and stocking action;
+2. action-based PES payment;
+3. co-location penalty;
+4. emergency movement cost when applicable.
 
-\[
-r_t^{gross}
-=
-0.5\,I(A_t,C_t)
-+
-0.5\,P(C_{t+1}).
-\]
+Stock survival is the only multiplier on direct livestock income in this baseline. Stock survival affects current-period reward, while the intended herd size selected by the action still determines current grazing pressure. Surviving herd size is recorded diagnostically but is not yet carried forward as an endogenous herd-state variable.
 
-The action-based model's co-location and emergency-cost structure is retained:
-
-\[
-r_t
-=
-r_t^{gross}\times interaction\_multiplier
--
-emergency\_cost\_scale\times emergency\_cost.
-\]
+Importantly, this reward enters the MADDPG update directly, so it influences future policy.
 
 ```{r reward}
 get_stock_survival<-function(action,rangeland_condition){
   unname(stock_survival[rangeland_condition,action])
 }
-
-compute_reward<-function(action,rangeland_condition,resulting_condition,n_agents_same_cell=1L,emergency_cost=0){
+compute_reward<-function(action,rangeland_condition,n_agents_same_cell=1L,emergency_cost=0){
   survival_rate<-get_stock_survival(action=action,rangeland_condition=rangeland_condition)
   intended_herd_size<-unname(action_herd_size[[action]])
   expected_surviving_herd<-intended_herd_size*survival_rate
   expected_stock_loss<-intended_herd_size-expected_surviving_herd
   livestock_income<-herd_income[[action]]*survival_rate
-  state_pes_reward<-unname(state_pes[[resulting_condition]])
-  income_component<-livestock_income
-  state_component<-state_pes_reward
-  gross_reward<-income_component+state_component
+  pes_reward<-pes_payment[[action]]
+  gross_reward<-livestock_income+pes_reward
   interaction_multiplier<-colocation_multiplier^max(n_agents_same_cell-1L,0L)
   reward_after_interaction<-gross_reward*interaction_multiplier
   net_reward<-reward_after_interaction-emergency_cost_scale*emergency_cost
   list(
     net_reward=net_reward,
     livestock_income=livestock_income,
-    state_pes_reward=state_pes_reward,
-    income_component=income_component,
-    state_component=state_component,
+    pes_reward=pes_reward,
     gross_reward=gross_reward,
     interaction_multiplier=interaction_multiplier,
     emergency_cost=emergency_cost,
@@ -1340,112 +1575,286 @@ compute_reward<-function(action,rangeland_condition,resulting_condition,n_agents
 ```
 
 ```{r test-reward, include=FALSE}
-reward_test<-expand_grid(
-  action=actions,
-  current_condition=r_states,
-  resulting_condition=r_states
-)%>%
+reward_test<-expand_grid(action=actions,condition=r_states)%>%
   mutate(
-    reward=pmap_dbl(
-      list(action,current_condition,resulting_condition),
-      ~compute_reward(
-        action=..1,
-        rangeland_condition=..2,
-        resulting_condition=..3
-      )$net_reward
-    )
+    stock_survival=map2_dbl(action,condition,~get_stock_survival(.x,.y)),
+    reward=map2_dbl(action,condition,~compute_reward(action=.x,rangeland_condition=.y)$net_reward)
   )
-stopifnot(all(stock_survival>=0&stock_survival<=1))
-stopifnot(all(map_dbl(actions,~compute_reward(.x,"degraded","intact")$livestock_income)<herd_income[actions]))
-stopifnot(compute_reward("200-400","good","intact")$state_pes_reward==state_pes[["intact"]])
-stopifnot(compute_reward("200-400","good","degraded")$state_pes_reward==state_pes[["degraded"]])
-reward_no_emergency<-compute_reward("200-400","good","good",emergency_cost=0)$net_reward
-reward_with_emergency<-compute_reward("200-400","good","good",emergency_cost=0.4)$net_reward
-stopifnot(abs((reward_no_emergency-reward_with_emergency)-emergency_cost_scale*0.4)<1e-12)
+stopifnot(all(reward_test$stock_survival>=0&reward_test$stock_survival<=1))
+stopifnot(all(map_dbl(actions,~compute_reward(.x,"degraded")$livestock_income)<herd_income[actions]))
 reward_test%>%
-  filter(current_condition=="good")%>%
-  ggplot(aes(action,reward,fill=resulting_condition))+
+  ggplot(aes(action,reward,fill=condition))+
   geom_col(position="dodge")+
   labs(
-    title="TEST: outcome-based PES reward enters learning",
-    subtitle="Livestock income uses current condition; PES uses resulting EMA-defined condition",
-    y="Net reward"
+    title="TEST: immediate reward enters learning",
+    subtitle="Rangeland condition affects livestock income through stock survival",
+    y="Net reward before movement/interaction cost"
   )+
   theme_minimal()
 ```
 
-#14. Q-learning update
+# . MADDPG actor-critic update
 
-The policy is updated through the standard one-step temporal-difference rule.
+MADDPG updates one centralised critic and one decentralised actor per agent from mini-batches sampled from the joint replay buffer.
 
-```{r q-learning}
-update_q<-function(
-    agent,
-    state_key,
-    action,
-    reward,
-    next_state_key
-) {
-  agent<-ensure_q_state(agent, state_key)
-  agent<-ensure_q_state(agent, next_state_key)
-  q_old<-agent$Q[
-    state_key,
-    action
-  ]
-  #At s_(t+1), the action just taken at t is the previous stocking category.
-  #Therefore only the same/adjacent actions are feasible in the Bellman max.
-  next_feasible_actions<-allowed_actions(action)
-  q_next_max<-max(
-    agent$Q[
-      next_state_key,
-      next_feasible_actions,
-      drop = TRUE
-    ]
+```{r maddpg-training}
+agent_obs_cols<-function(i){
+  ((i-1L)*observation_dim+1L):(i*observation_dim)
+}
+
+agent_action_cols<-function(i){
+  action_dim<-length(actions)
+  ((i-1L)*action_dim+1L):(i*action_dim)
+}
+
+soft_update_module<-function(target,source,tau_value=target_tau){
+  target_parameters<-target$parameters
+  source_parameters<-source$parameters
+
+  stopifnot(length(target_parameters)==length(source_parameters))
+
+  with_no_grad({
+    for(k in seq_along(target_parameters)){
+      target_parameters[[k]]$mul_(1-tau_value)
+      target_parameters[[k]]$add_(
+        source_parameters[[k]],
+        alpha=tau_value
+      )
+    }
+  })
+
+  invisible(target)
+}
+
+build_joint_policy_actions<-function(
+    system,
+    joint_obs_tensor,
+    joint_mask_tensor,
+    focal_agent=NULL,
+    target=FALSE
+){
+  action_tensors<-vector("list",length(system$agent_ids))
+
+  for(j in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[j]]
+    obs_j<-joint_obs_tensor[,agent_obs_cols(j)]
+    mask_j<-joint_mask_tensor[,agent_action_cols(j)]
+
+    actor<-if(target){
+      system$target_actors[[id]]
+    }else{
+      system$actors[[id]]
+    }
+
+    logits<-actor(obs_j)
+    masked_logits<-mask_logits_tensor(logits,mask_j)
+
+    if(target){
+      # Target actions are deterministic soft probability vectors.
+      # The critic accepts continuous action vectors during learning.
+      action_j<-nnf_softmax(masked_logits,dim=2)
+    }else if(identical(id,focal_agent)){
+      # Straight-through Gumbel-Softmax: hard in the forward pass,
+      # differentiable in the backward pass.
+      action_j<-nnf_gumbel_softmax(
+        masked_logits,
+        tau=gumbel_tau,
+        hard=TRUE,
+        dim=2
+      )
+    }else{
+      # Other agents are treated as fixed while actor i is updated.
+      action_j<-nnf_softmax(masked_logits,dim=2)$detach()
+    }
+
+    action_tensors[[j]]<-action_j
+  }
+
+  torch_cat(action_tensors,dim=2)
+}
+
+maddpg_train_step<-function(system,replay_buffer){
+  if(replay_buffer$size<learning_starts){
+    return(
+      list(
+        system=system,
+        log=tibble()
+      )
+    )
+  }
+
+  batch<-replay_sample(
+    replay_buffer,
+    n=batch_size
   )
-  td_target<-reward+agent$gamma*q_next_max
-  td_error<-td_target - q_old
-  q_new<-q_old+agent$alpha*td_error
-  agent$Q[
-    state_key,
-    action
-  ]<-q_new
+
+  obs_tensor<-torch_tensor(batch$obs,dtype=torch_float())
+  actions_tensor<-torch_tensor(batch$actions,dtype=torch_float())
+  rewards_tensor<-torch_tensor(batch$rewards,dtype=torch_float())
+  next_obs_tensor<-torch_tensor(batch$next_obs,dtype=torch_float())
+  masks_tensor<-torch_tensor(batch$masks,dtype=torch_float())
+  next_masks_tensor<-torch_tensor(batch$next_masks,dtype=torch_float())
+  done_tensor<-torch_tensor(batch$done,dtype=torch_float())
+
+  loss_rows<-vector("list",length(system$agent_ids))
+
+  # ---------------------------
+  # 1. Centralised critic update
+  # ---------------------------
+  target_joint_actions<-with_no_grad({
+    build_joint_policy_actions(
+      system=system,
+      joint_obs_tensor=next_obs_tensor,
+      joint_mask_tensor=next_masks_tensor,
+      target=TRUE
+    )
+  })
+
+  critic_losses<-numeric(length(system$agent_ids))
+
+  for(i in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[i]]
+
+    system$critics[[id]]$train()
+    system$critic_optimizers[[id]]$zero_grad()
+
+    q_pred<-system$critics[[id]](
+      obs_tensor,
+      actions_tensor
+    )
+
+    reward_i<-rewards_tensor[,i]$unsqueeze(2)
+
+    q_next<-with_no_grad({
+      system$target_critics[[id]](
+        next_obs_tensor,
+        target_joint_actions
+      )
+    })
+
+    q_target<-reward_i+
+      gamma*(1-done_tensor)*q_next
+
+    critic_loss<-nnf_mse_loss(
+      q_pred,
+      q_target
+    )
+
+    critic_loss$backward()
+    system$critic_optimizers[[id]]$step()
+
+    critic_losses[[i]]<-critic_loss$item()
+  }
+
+  # ---------------------------
+  # 2. Decentralised actor update
+  # ---------------------------
+  actor_losses<-numeric(length(system$agent_ids))
+
+  for(i in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[i]]
+
+    system$actors[[id]]$train()
+    system$actor_optimizers[[id]]$zero_grad()
+    system$critic_optimizers[[id]]$zero_grad()
+
+    policy_joint_actions<-build_joint_policy_actions(
+      system=system,
+      joint_obs_tensor=obs_tensor,
+      joint_mask_tensor=masks_tensor,
+      focal_agent=id,
+      target=FALSE
+    )
+
+    actor_loss<-
+      -system$critics[[id]](
+        obs_tensor,
+        policy_joint_actions
+      )$mean()
+
+    actor_loss$backward()
+    system$actor_optimizers[[id]]$step()
+
+    actor_losses[[i]]<-actor_loss$item()
+  }
+
+  # ---------------------------
+  # 3. Polyak target-network update
+  # ---------------------------
+  for(id in system$agent_ids){
+    soft_update_module(
+      system$target_actors[[id]],
+      system$actors[[id]]
+    )
+    soft_update_module(
+      system$target_critics[[id]],
+      system$critics[[id]]
+    )
+  }
+
+  system$updates<-system$updates+1L
+
+  log<-tibble(
+    update=system$updates,
+    agent_id=system$agent_ids,
+    actor_loss=actor_losses,
+    critic_loss=critic_losses
+  )
+
   list(
-    agent = agent,
-    q_old = q_old,
-    q_new = q_new,
-    td_target = td_target,
-    td_error = td_error,
-    next_feasible_actions = next_feasible_actions
+    system=system,
+    log=log
   )
 }
 ```
 
-```{r test-q-learning, include=FALSE}
-q_agent_test<-create_agent("A1", initial_action = "200-400")
-s0<-"demo_state_0"
-s1<-"demo_state_1"
-q_agent_test<-ensure_q_state(q_agent_test, s0)
-q_agent_test<-ensure_q_state(q_agent_test, s1)
-q_update_test<-update_q(
-  q_agent_test,
-  state_key = s0,
-  action = "200-400",
-  reward = 2,
-  next_state_key = s1
+```{r test-maddpg-training, include=FALSE}
+training_system_test<-create_maddpg_system()
+training_buffer_test<-new_replay_buffer(100L)
+
+dummy_obs<-matrix(
+  0,
+  nrow=length(initial_actions),
+  ncol=observation_dim
 )
-expected_q<-0 + alpha * (2 + gamma * 0 - 0)
-stopifnot(abs(q_update_test$q_new - expected_q) < 1e-12)
-stopifnot(identical(
-  q_update_test$next_feasible_actions,
-  allowed_actions("200-400")
-))
+dummy_obs[,1]<-1
+dummy_action<-diag(length(actions))[
+  rep(1,length(initial_actions)),
+  ,
+  drop=FALSE
+]
+dummy_masks<-matrix(
+  1,
+  nrow=length(initial_actions),
+  ncol=length(actions)
+)
+
+for(i in seq_len(learning_starts)){
+  replay_add(
+    training_buffer_test,
+    obs=dummy_obs,
+    action_onehot=dummy_action,
+    rewards=rep(0,length(initial_actions)),
+    next_obs=dummy_obs,
+    masks=dummy_masks,
+    next_masks=dummy_masks,
+    done=0
+  )
+}
+
+training_update_test<-maddpg_train_step(
+  training_system_test,
+  training_buffer_test
+)
+
+stopifnot(nrow(training_update_test$log)==length(initial_actions))
+stopifnot(all(is.finite(training_update_test$log$actor_loss)))
+stopifnot(all(is.finite(training_update_test$log$critic_loss)))
 ```
 
-#15. Convert combined herd pressure to an ecological action
+# . Convert combined herd pressure to an ecological footprint
 
-If several agents occupy the same cell, their herd sizes are added before the ecological transition is sampled.
-
-This is separate from the reward co-location penalty.
+If several agents occupy the same cell, their herd sizes are added before the ecological transition is sampled to account for the total grazing pressure in each cell. 
 
 ```{r combined-pressure}
 herd_size_to_action<-function(total_herd_size) {
@@ -1470,9 +1879,9 @@ stopifnot(
 )
 ```
 
-#16. Update the landscape once per step
+# . Update the landscape once per step
 
-Each of the 25 cells is updated once per iteration and keeps its own persistent ecological EMA. For grazed cells, the stochastic ecological transition uses the **combined** herd pressure of all agents present. For ungrazed cells, ecological action is `none`: grazing pressure is zero, but weather still affects the stochastic transition outcome. A previously grazed emergency cell therefore retains its ecological history after the herder leaves. Every update is written to the cell-level ledger.
+Each of the 25 cells is updated once per iteration and keeps its own persistent ecological EMA. For grazed cells, the stochastic ecological transition uses the **combined** herd pressure of all agents present. For ungrazed cells, ecological footprint is `none`: grazing pressure is zero, but weather still affects the stochastic transition outcome. A previously grazed emergency cell therefore retains its ecological history after the herder leaves. Every update is written to the cell-level ledger.
 
 ```{r landscape-update}
 update_landscape<-function(land_grid,action_log,transition_weather,step){
@@ -1553,7 +1962,7 @@ stopifnot(
 )
 ```
 
-#17. One simultaneous MARL step
+# . One simultaneous MARL step
 
 This is the core multi-agent step.
 
@@ -1561,16 +1970,16 @@ Order of operations:
 
 1. Resolve each agent's current location using the current EMA-defined landscape and current weather.
 2. Share current locations and previous stocking-category herd sizes.
-3. Construct \(s_t\).
-4. Restrict each agent to the same or adjacent stocking category relative to \(A_{t-1}\), then sample \(A_t\) from softmax Q over that feasible set.
-5. Calculate shared-cell interaction counts and retain current condition \(C_t\) for survival-adjusted livestock income.
-6. Update **every** cell from \(t\) to \(t+1\): combined \(A_t\) (or `none`) + \(W_{t+1}\) generates a stochastic transition outcome, updates the cell EMA, and defines \(C_{t+1}\).
-7. Read the resulting EMA-defined condition \(C_{t+1}\) of the cell grazed at time \(t\).
-8. Calculate the outcome-based reward using the same co-location and emergency-cost structure as the action-based model.
-9. Resolve next locations using \(W_{t+1}\) and the updated EMA-defined landscape.
-10. Construct \(s_{t+1}\).
-11. Update Q, maximizing only over actions feasible from \(A_t\).
-12. Update agent history and write ledgers.
+3. Construct each agent's local numeric observation.
+4. Each decentralised actor selects a feasible discrete stocking action using masked straight-through Gumbel-Softmax.
+5. Calculate shared-cell interaction counts and immediate Action-PES rewards.
+6. Update every cell from \(t\) to \(t+1\) using the unchanged ecological transition model.
+7. Resolve next locations and construct next observations.
+8. Store the joint transition \((O_t,A_t,R_t,O_{t+1})\) in replay memory.
+9. After the replay warm-up, update all centralised critics and decentralised actors from a random mini-batch.
+10. Polyak-update target actor and critic networks.
+11. Carry each realised discrete stocking action forward as the next previous-action anchor.
+12. Write agent, reward, ecological and learning ledgers.
 
 ```{r marl-step}
 marl_step<-function(
@@ -1578,459 +1987,534 @@ marl_step<-function(
     land_grid,
     weather,
     next_weather,
-    step
-) {
-  #------------------------------------------------------------
-  #A. Resolve locations in current state s_t
-  #------------------------------------------------------------
+    step,
+    maddpg,
+    replay_buffer,
+    train=TRUE,
+    explore=TRUE
+){
+  # ------------------------------------------------------------
+  # A. Resolve locations in current state
+  # ------------------------------------------------------------
   location_results<-map(
     names(agents),
-    ~ resolve_location(
-      agent_id = .x,
-      step = step,
-      weather = weather,
-      land_grid = land_grid
+    ~resolve_location(
+      agent_id=.x,
+      step=step,
+      weather=weather,
+      land_grid=land_grid
     )
   )
   names(location_results)<-names(agents)
-  for (id in names(agents)) {
+
+  for(id in names(agents)){
     agents[[id]]$current_cell<-location_results[[id]]$cell_id
   }
-  #------------------------------------------------------------
-  #B. Information sharing before action selection
-  #------------------------------------------------------------
+
+  # ------------------------------------------------------------
+  # B. Shared information before action selection
+  # ------------------------------------------------------------
   shared_info<-share_agent_information(
     agents,
     land_grid
   )
-  #------------------------------------------------------------
-  #C. Observe s_t
-  #s_t = (cell, EMA-defined condition, weather,
-  #neighbour density, previous stocking category)
-  #------------------------------------------------------------
+
+  # ------------------------------------------------------------
+  # C. Local observations o_i,t
+  # ------------------------------------------------------------
   state_keys<-setNames(
     map_chr(
       agents,
       observe_agent_state,
-      land_grid = land_grid,
-      weather = weather,
-      shared_info = shared_info
+      land_grid=land_grid,
+      weather=weather,
+      shared_info=shared_info
     ),
     names(agents)
   )
-  #------------------------------------------------------------
-  #D. Choose A_t simultaneously, constrained by A_(t-1)
-  #------------------------------------------------------------
-  action_results<-map2(
+
+  observation_list<-map(
     agents,
-    state_keys,
-    select_action_q
+    observe_agent_vector,
+    land_grid=land_grid,
+    weather=weather,
+    shared_info=shared_info
   )
-  #Preserve any newly created Q rows.
-  for (id in names(agents)) {
-    agents[[id]]<-action_results[[id]]$agent
-  }
-  chosen_actions<-setNames(
-    map_chr(action_results, "action"),
+
+  observations<-do.call(
+    rbind,
+    observation_list
+  )
+  rownames(observations)<-names(agents)
+
+  current_masks<-do.call(
+    rbind,
+    lapply(
+      agents,
+      function(agent)action_mask(agent$previous_action)
+    )
+  )
+  rownames(current_masks)<-names(agents)
+
+  # ------------------------------------------------------------
+  # D. Decentralised actor choice with Gumbel-Softmax
+  # ------------------------------------------------------------
+  action_results<-setNames(
+    lapply(
+      seq_along(agents),
+      function(i){
+        id<-names(agents)[[i]]
+        select_action_actor(
+          actor=maddpg$actors[[id]],
+          observation=observations[i,],
+          previous_action=agents[[id]]$previous_action,
+          explore=explore
+        )
+      }
+    ),
     names(agents)
   )
+
+  chosen_actions<-setNames(
+    map_chr(action_results,"action"),
+    names(agents)
+  )
+
+  action_onehot<-do.call(
+    rbind,
+    lapply(action_results,`[[`,"one_hot")
+  )
+  rownames(action_onehot)<-names(agents)
+
   herd_sizes<-action_herd_size[chosen_actions]
-  #------------------------------------------------------------
-  #E. Build simultaneous action log
-  #------------------------------------------------------------
+
+  # ------------------------------------------------------------
+  # E. Simultaneous action log
+  # ------------------------------------------------------------
   action_log<-tibble(
-    agent_id = names(agents),
-    cell_id = map_int(agents, "current_cell"),
-    previous_action = map_chr(agents, "previous_action"),
-    action = unname(chosen_actions),
-    herd_size = as.numeric(herd_sizes),
-    state_key = unname(state_keys),
-    feasible_actions = map_chr(
+    agent_id=names(agents),
+    cell_id=map_int(agents,"current_cell"),
+    previous_action=map_chr(agents,"previous_action"),
+    action=unname(chosen_actions),
+    herd_size=as.numeric(herd_sizes),
+    state_key=unname(state_keys),
+    feasible_actions=map_chr(
       action_results,
-      ~ paste(.x$feasible_actions, collapse = " | ")
+      ~paste(.x$feasible_actions,collapse=" | ")
     ),
-    chosen_probability = map2_dbl(
+    chosen_probability=map2_dbl(
       action_results,
       chosen_actions,
-      ~ unname(.x$probabilities[[.y]])
+      ~unname(.x$probabilities[[.y]])
     ),
-    movement_mode = map_chr(location_results, "movement_mode"),
-    emergency_cost = map_dbl(location_results, "emergency_cost"),
-    travel_cost = map_dbl(location_results, "travel_cost"),
-    social_cost = map_dbl(location_results, "social_cost")
-  ) %>%
-    group_by(cell_id) %>%
-    mutate(n_agents_same_cell = n()) %>%
+    movement_mode=map_chr(location_results,"movement_mode"),
+    emergency_cost=map_dbl(location_results,"emergency_cost"),
+    travel_cost=map_dbl(location_results,"travel_cost"),
+    social_cost=map_dbl(location_results,"social_cost")
+  )%>%
+    group_by(cell_id)%>%
+    mutate(n_agents_same_cell=n())%>%
     ungroup()
-  #------------------------------------------------------------
-  #F. Retain current ecological state C_t for livestock income
-  #------------------------------------------------------------
-  action_log<-action_log %>%
+
+  # ------------------------------------------------------------
+  # F. Immediate Action-PES reward
+  # ------------------------------------------------------------
+  action_log<-action_log%>%
     left_join(
-      land_grid %>%
-        select(cell_id, rangeland_condition),
-      by = "cell_id"
+      land_grid%>%
+        select(cell_id,rangeland_condition),
+      by="cell_id"
     )
-  #------------------------------------------------------------
-  #G. Ecology evolves from t -> t+1
-  #
-  #A_t is the previous stocking category from the perspective of s_(t+1).
-  #W_(t+1) is the current weather that helps generate C_(t+1).
-  #Every cell is updated, including cells with ecological_footprint = "none".
-  #------------------------------------------------------------
-  landscape_update<-update_landscape(
-    land_grid = land_grid,
-    action_log = action_log,
-    transition_weather = next_weather,
-    step = step
-  )
-  next_land_grid<-landscape_update$land_grid
-  #------------------------------------------------------------
-  #H. Read resulting state C_(t+1) and calculate outcome reward
-  #------------------------------------------------------------
-  outcome_lookup<-landscape_update$ledger %>%
-    select(
-      cell_id,
-      transition_outcome,
-      resulting_ema = ema_after,
-      resulting_condition = condition_after
-    )
-  action_log<-action_log %>%
-    left_join(outcome_lookup,by="cell_id")
+
   reward_components<-pmap(
     list(
       action_log$action,
       action_log$rangeland_condition,
-      action_log$resulting_condition,
       action_log$n_agents_same_cell,
       action_log$emergency_cost
     ),
     function(
         action,
         rangeland_condition,
-        resulting_condition,
         n_agents_same_cell,
         emergency_cost
     ){
       compute_reward(
         action=action,
         rangeland_condition=rangeland_condition,
-        resulting_condition=resulting_condition,
         n_agents_same_cell=n_agents_same_cell,
         emergency_cost=emergency_cost
       )
     }
   )
+
   action_log$reward<-map_dbl(reward_components,"net_reward")
   action_log$livestock_income<-map_dbl(reward_components,"livestock_income")
-  action_log$state_pes_reward<-map_dbl(reward_components,"state_pes_reward")
-  action_log$income_component<-map_dbl(reward_components,"income_component")
-  action_log$state_component<-map_dbl(reward_components,"state_component")
+  action_log$pes_reward<-map_dbl(reward_components,"pes_reward")
   action_log$gross_reward<-map_dbl(reward_components,"gross_reward")
   action_log$stock_survival<-map_dbl(reward_components,"stock_survival")
   action_log$expected_surviving_herd<-map_dbl(reward_components,"expected_surviving_herd")
   action_log$expected_stock_loss<-map_dbl(reward_components,"expected_stock_loss")
   action_log$interaction_multiplier<-map_dbl(reward_components,"interaction_multiplier")
-  #------------------------------------------------------------
-  #I. Construct agent history/location for s_(t+1)
-  #------------------------------------------------------------
+
+  # ------------------------------------------------------------
+  # G. Ecology evolves t -> t+1
+  # ------------------------------------------------------------
+  landscape_update<-update_landscape(
+    land_grid=land_grid,
+    action_log=action_log,
+    transition_weather=next_weather,
+    step=step
+  )
+
+  next_land_grid<-landscape_update$land_grid
+
+  # ------------------------------------------------------------
+  # H. Construct next agent locations and observations
+  # ------------------------------------------------------------
   next_agents<-agents
-  for (id in names(next_agents)) {
+
+  for(id in names(next_agents)){
     next_agents[[id]]$previous_action<-chosen_actions[[id]]
     next_agents[[id]]$herd_size<-unname(
       action_herd_size[[chosen_actions[[id]]]]
     )
+
     next_location<-resolve_location(
-      agent_id = id,
-      step = step + 1L,
-      weather = next_weather,
-      land_grid = next_land_grid
+      agent_id=id,
+      step=step+1L,
+      weather=next_weather,
+      land_grid=next_land_grid
     )
+
     next_agents[[id]]$current_cell<-next_location$cell_id
   }
+
   next_shared_info<-share_agent_information(
     next_agents,
     next_land_grid
   )
+
   next_state_keys<-setNames(
     map_chr(
       next_agents,
       observe_agent_state,
-      land_grid = next_land_grid,
-      weather = next_weather,
-      shared_info = next_shared_info
+      land_grid=next_land_grid,
+      weather=next_weather,
+      shared_info=next_shared_info
     ),
     names(next_agents)
   )
-  #------------------------------------------------------------
-  #J. Q-learning update
-  #------------------------------------------------------------
-  q_diagnostics<-vector("list", length(agents))
-  names(q_diagnostics)<-names(agents)
-  for (id in names(agents)) {
-    reward_i<-action_log$reward[
-      action_log$agent_id == id
-    ]
-    update<-update_q(
-      agent = agents[[id]],
-      state_key = state_keys[[id]],
-      action = chosen_actions[[id]],
-      reward = reward_i,
-      next_state_key = next_state_keys[[id]]
+
+  next_observation_list<-map(
+    next_agents,
+    observe_agent_vector,
+    land_grid=next_land_grid,
+    weather=next_weather,
+    shared_info=next_shared_info
+  )
+
+  next_observations<-do.call(
+    rbind,
+    next_observation_list
+  )
+  rownames(next_observations)<-names(next_agents)
+
+  next_masks<-do.call(
+    rbind,
+    lapply(
+      next_agents,
+      function(agent)action_mask(agent$previous_action)
     )
-    updated_agent<-update$agent
-    updated_agent$previous_action<-chosen_actions[[id]]
-    updated_agent$herd_size<-unname(
-      action_herd_size[[chosen_actions[[id]]]]
-    )
-    updated_agent$current_cell<-next_agents[[id]]$current_cell
-    agents[[id]]<-updated_agent
-    q_diagnostics[[id]]<-tibble(
-      agent_id = id,
-      state_key = state_keys[[id]],
-      previous_action = action_log$previous_action[
-        action_log$agent_id == id
-      ],
-      action = chosen_actions[[id]],
-      reward = reward_i,
-      next_state_key = next_state_keys[[id]],
-      q_old = update$q_old,
-      q_new = update$q_new,
-      td_target = update$td_target,
-      td_error = update$td_error,
-      next_feasible_actions = paste(
-        update$next_feasible_actions,
-        collapse = " | "
+  )
+  rownames(next_masks)<-names(next_agents)
+
+  # ------------------------------------------------------------
+  # I. Store one joint transition in replay memory
+  # ------------------------------------------------------------
+  reward_vector<-setNames(
+    action_log$reward,
+    action_log$agent_id
+  )[names(agents)]
+
+  replay_add(
+    replay_buffer,
+    obs=observations,
+    action_onehot=action_onehot,
+    rewards=reward_vector,
+    next_obs=next_observations,
+    masks=current_masks,
+    next_masks=next_masks,
+    done=0
+  )
+
+  # ------------------------------------------------------------
+  # J. MADDPG gradient updates
+  # ------------------------------------------------------------
+  training_rows<-list()
+
+  if(train&&replay_buffer$size>=learning_starts){
+    for(u in seq_len(updates_per_step)){
+      update<-maddpg_train_step(
+        maddpg,
+        replay_buffer
       )
-    )
+      maddpg<-update$system
+      training_rows[[u]]<-update$log
+    }
   }
-  q_log<-bind_rows(q_diagnostics) %>%
-    mutate(step = step)
-  action_log<-action_log %>%
+
+  training_log<-bind_rows(training_rows)
+
+  if(nrow(training_log)>0){
+    training_log<-training_log%>%
+      mutate(step=step)
+  }
+
+  action_log<-action_log%>%
     mutate(
-      step = step,
-      weather = weather,
-      next_weather = next_weather
+      step=step,
+      weather=weather,
+      next_weather=next_weather
     )
+
   list(
-    agents = agents,
-    land_grid = next_land_grid,
-    action_log = action_log,
-    cell_ledger = landscape_update$ledger,
-    q_log = q_log,
-    shared_info = shared_info,
-    next_shared_info = next_shared_info
+    agents=next_agents,
+    maddpg=maddpg,
+    replay_buffer=replay_buffer,
+    land_grid=next_land_grid,
+    action_log=action_log,
+    cell_ledger=landscape_update$ledger,
+    training_log=training_log,
+    state_keys=state_keys,
+    next_state_keys=next_state_keys,
+    shared_info=shared_info,
+    next_shared_info=next_shared_info
   )
 }
 ```
 
 ```{r test-marl-step, include=FALSE}
 set.seed(101)
+torch_manual_seed(101)
+
+one_step_system<-create_maddpg_system()
+one_step_buffer<-new_replay_buffer()
+
 one_step_test<-marl_step(
-  agents = agents_initial,
-  land_grid = land_grid_initial,
-  weather = "normal",
-  next_weather = "drought",
-  step = 1
+  agents=agents_initial,
+  land_grid=land_grid_initial,
+  weather="normal",
+  next_weather="drought",
+  step=1,
+  maddpg=one_step_system,
+  replay_buffer=one_step_buffer,
+  train=TRUE,
+  explore=TRUE
 )
-stopifnot(nrow(one_step_test$action_log) == 6)
-stopifnot(nrow(one_step_test$cell_ledger) == 25)
-stopifnot(nrow(one_step_test$q_log) == 6)
-stopifnot(any(one_step_test$q_log$q_new != 0))
-#Every selected action must satisfy the previous-action anchor.
+
+stopifnot(nrow(one_step_test$action_log)==6)
+stopifnot(nrow(one_step_test$cell_ledger)==25)
+stopifnot(one_step_test$replay_buffer$size==1L)
+
+# Every realised action respects the adjacent-category constraint.
 stopifnot(all(
   map2_lgl(
     one_step_test$action_log$previous_action,
     one_step_test$action_log$action,
-    ~ .y %in% allowed_actions(.x)
+    ~.y%in%allowed_actions(.x)
   )
 ))
-#The ecological update uses next_weather to create the next condition.
+
+# Ecology uses next weather to generate the next condition.
 stopifnot(all(
-  one_step_test$cell_ledger$transition_weather == "drought"
+  one_step_test$cell_ledger$transition_weather=="drought"
 ))
-stopifnot(all(
-  one_step_test$action_log$state_pes_reward==
-    unname(state_pes[one_step_test$action_log$resulting_condition])
-))
-stopifnot(all(c("emergency_cost","travel_cost","social_cost")%in%names(one_step_test$action_log)))
 ```
 
-#18. Full MARL simulation
+# . Full MADDPG simulation
 
-The weather sequence has length `steps + 1` so that \(s'\) includes the next observed weather condition when Q is updated.
+The weather sequence has length `steps + 1` so that \(s'\) includes the next observed weather condition when the replay transition is stored and MADDPG is updated.
 
 ```{r simulate-marl}
 simulate_marl<-function(
-    steps = 500L,
-    seed = NULL,
-    initial_agents = NULL,
-    initial_land_grid = NULL
-) {
-  if (!is.null(seed)) {
+    steps=300L,
+    seed=NULL,
+    initial_agents=NULL,
+    initial_land_grid=NULL,
+    initial_maddpg=NULL,
+    train=TRUE,
+    explore=TRUE,
+    return_maddpg=FALSE
+){
+  if(!is.null(seed)){
     set.seed(seed)
+    torch_manual_seed(as.integer(seed))
   }
-  agents<-if (is.null(initial_agents)) {
+
+  agents<-if(is.null(initial_agents)){
     setNames(
       lapply(
         names(initial_actions),
-        function(id) {
+        function(id){
           create_agent(
-            agent_id = id,
-            initial_action = initial_actions[[id]]
+            agent_id=id,
+            initial_action=initial_actions[[id]]
           )
         }
       ),
       names(initial_actions)
     )
-  } else {
+  }else{
     initial_agents
   }
-  land_grid<-if (is.null(initial_land_grid)) {
+
+  land_grid<-if(is.null(initial_land_grid)){
     make_land_grid()
-  } else {
+  }else{
     initial_land_grid
   }
-  #W_t is observed in s_t. W_(t+1) is used with A_t to generate C_(t+1).
-  weather_sequence<-draw_weather(steps + 1L)
-  action_logs<-vector("list", steps)
-  cell_ledgers<-vector("list", steps)
-  q_logs<-vector("list", steps)
-  shared_ledgers<-vector("list", steps)
-  landscape_counts<-vector("list", steps)
-  for (t in seq_len(steps)) {
-    result<-marl_step(
-      agents = agents,
-      land_grid = land_grid,
-      weather = weather_sequence[t],
-      next_weather = weather_sequence[t + 1L],
-      step = t
+
+  maddpg<-if(is.null(initial_maddpg)){
+    create_maddpg_system(
+      agent_ids=names(agents)
     )
+  }else{
+    initial_maddpg
+  }
+
+  replay_buffer<-new_replay_buffer()
+
+  # W_t is observed in o_t. W_(t+1) helps generate C_(t+1).
+  weather_sequence<-draw_weather(steps+1L)
+
+  action_logs<-vector("list",steps)
+  cell_ledgers<-vector("list",steps)
+  training_logs<-vector("list",steps)
+  shared_ledgers<-vector("list",steps)
+  landscape_counts<-vector("list",steps)
+
+  for(t in seq_len(steps)){
+    result<-marl_step(
+      agents=agents,
+      land_grid=land_grid,
+      weather=weather_sequence[t],
+      next_weather=weather_sequence[t+1L],
+      step=t,
+      maddpg=maddpg,
+      replay_buffer=replay_buffer,
+      train=train,
+      explore=explore
+    )
+
     agents<-result$agents
+    maddpg<-result$maddpg
+    replay_buffer<-result$replay_buffer
     land_grid<-result$land_grid
+
     action_logs[[t]]<-result$action_log
     cell_ledgers[[t]]<-result$cell_ledger
-    q_logs[[t]]<-result$q_log
-    shared_ledgers[[t]]<-result$shared_info %>%
-      mutate(step = t)
+    training_logs[[t]]<-result$training_log
+    shared_ledgers[[t]]<-result$shared_info%>%
+      mutate(step=t)
+
     condition_count<-table(
       factor(
         land_grid$rangeland_condition,
-        levels = r_states
+        levels=r_states
       )
     )
+
     landscape_counts[[t]]<-tibble(
-      step = t,
-      intact = unname(condition_count["intact"]),
-      good = unname(condition_count["good"]),
-      poor = unname(condition_count["poor"]),
-      degraded = unname(condition_count["degraded"]),
-      pct_degraded =
-        100 * unname(condition_count["degraded"]) / nrow(land_grid),
-      mean_ema = mean(land_grid$condition_ema_score),
-      max_ema = max(land_grid$condition_ema_score)
+      step=t,
+      intact=unname(condition_count["intact"]),
+      good=unname(condition_count["good"]),
+      poor=unname(condition_count["poor"]),
+      degraded=unname(condition_count["degraded"]),
+      pct_degraded=
+        100*unname(condition_count["degraded"])/nrow(land_grid),
+      mean_ema=mean(land_grid$condition_ema_score),
+      max_ema=max(land_grid$condition_ema_score)
     )
   }
+
   list(
-    agents = agents,
-    land_grid = land_grid,
-    weather = weather_sequence,
-    action_log = bind_rows(action_logs),
-    cell_ledger = bind_rows(cell_ledgers),
-    q_log = bind_rows(q_logs),
-    shared_ledger = bind_rows(shared_ledgers),
-    landscape_counts = bind_rows(landscape_counts)
+    agents=agents,
+    maddpg=if(return_maddpg)maddpg else NULL,
+    replay_size=replay_buffer$size,
+    land_grid=land_grid,
+    weather=weather_sequence,
+    action_log=bind_rows(action_logs),
+    cell_ledger=bind_rows(cell_ledgers),
+    training_log=bind_rows(training_logs),
+    shared_ledger=bind_rows(shared_ledgers),
+    landscape_counts=bind_rows(landscape_counts)
   )
 }
 ```
 
 ```{r test-simulation, include=FALSE}
 simulation_test<-simulate_marl(
-  steps = 100,
-  seed = 321
+  steps=100L,
+  seed=321L,
+  train=TRUE,
+  explore=TRUE
 )
-stopifnot(nrow(simulation_test$action_log) == 100 * 6)
-stopifnot(nrow(simulation_test$cell_ledger) == 100 * 25)
+
+stopifnot(nrow(simulation_test$action_log)==100*6)
+stopifnot(nrow(simulation_test$cell_ledger)==100*25)
+stopifnot(simulation_test$replay_size==100L)
+stopifnot(nrow(simulation_test$training_log)>0)
+
 stopifnot(all(
-  simulation_test$landscape_counts$degraded >= 0 &
-    simulation_test$landscape_counts$degraded <= 25
+  simulation_test$landscape_counts$degraded>=0&
+    simulation_test$landscape_counts$degraded<=25
 ))
-#The environment must actually generate stochastic transition outcomes.
+
+# The environment must generate stochastic transition outcomes.
 stopifnot(any(
-  simulation_test$cell_ledger$transition_outcome !=
+  simulation_test$cell_ledger$transition_outcome!=
     simulation_test$cell_ledger$condition_before
 ))
-#There must be ungrazed cells in the ledger and each still has an EMA update.
-ungrazed_rows<-simulation_test$cell_ledger %>%
-  filter(ecological_footprint == "none")
-stopifnot(nrow(ungrazed_rows) > 0)
+
+# Ungrazed cells retain ecological-memory updates.
+ungrazed_rows<-simulation_test$cell_ledger%>%
+  filter(ecological_footprint=="none")
+
+stopifnot(nrow(ungrazed_rows)>0)
 stopifnot(all(is.finite(ungrazed_rows$ema_after)))
-#Every realised herder action obeys the adjacent-category constraint.
+
+# Every realised herder action obeys the adjacent-category constraint.
 stopifnot(all(
   map2_lgl(
     simulation_test$action_log$previous_action,
     simulation_test$action_log$action,
-    ~ .y %in% allowed_actions(.x)
+    ~.y%in%allowed_actions(.x)
   )
 ))
-#Diagnostic table: all landscape states, not only degraded cells.
-simulation_test$landscape_counts %>%
-  select(step, intact, good, poor, degraded, mean_ema, max_ema) %>%
+
+simulation_test$landscape_counts%>%
+  select(step,intact,good,poor,degraded,mean_ema,max_ema)%>%
   tail()
 ```
 
-##18.1 Short simulation diagnostic
+# . Train one MADDPG system
 
-The diagnostic below plots all four EMA-defined landscape classes rather than only degraded cells. This makes it possible to see ecological transition before any cell reaches the degraded threshold.
-
-```{r diagnostic-short-simulation}
-simulation_test$landscape_counts %>%
-  select(step, intact, good, poor, degraded) %>%
-  pivot_longer(
-    cols = -step,
-    names_to = "condition",
-    values_to = "n_cells"
-  ) %>%
-  ggplot(aes(step, n_cells, colour = condition)) +
-  geom_line(linewidth = 0.8) +
-  scale_y_continuous(limits = c(0, 25), breaks = 0:25) +
-  labs(
-    title = "Landscape condition through the 100-step test",
-    x = "Iteration",
-    y = "Number of cells",
-    colour = "Condition"
-  ) +
-  theme_minimal()
-simulation_test$landscape_counts %>%
-  ggplot(aes(step, mean_ema)) +
-  geom_line(linewidth = 0.8) +
-  geom_line(aes(y = max_ema), linetype = "dashed", linewidth = 0.8) +
-  geom_hline(yintercept = c(0.5, 1.5, 2.5), linetype = "dotted") +
-  labs(
-    title = "Cell ecological EMA through the 100-step test",
-    subtitle = "Solid = landscape mean; dashed = maximum cell EMA",
-    x = "Iteration",
-    y = "EMA severity"
-  ) +
-  theme_minimal()
-```
-
-#19. Train one MARL system
-
-This is one continuous learning trajectory. Q tables carry forward throughout the run.
+This is one continuous learning trajectory. Actor and critic parameters, target networks and replay memory carry forward throughout the run.
 
 ```{r train-model}
 results_train<-simulate_marl(
-  steps = 250,
-  seed = 128
+  steps=500L,
+  seed=128L,
+  train=TRUE,
+  explore=TRUE,
+  return_maddpg=TRUE
 )
 ```
 
-#20. Core diagnostics
+# . Core diagnostics
 
-##20.1 Landscape degradation
-
-Both count and percentage are retained. The count is especially informative for a 25-cell landscape.
+## .1 Landscape degradation
 
 ```{r plot-degradation}
 p_degraded_pct<-results_train$landscape_counts %>%
@@ -2045,14 +2529,14 @@ p_degraded_pct<-results_train$landscape_counts %>%
 p_degraded_pct
 ```
 
-##20.2 Action mix through time
+## .2 Action mix through time
 
 ```{r plot-action-mix}
 results_train$action_log %>%
   mutate(
     period = cut(
       step,
-      breaks = seq(0, 250, by = 50),
+      breaks = seq(0,500, by = 50),
       include.lowest = TRUE
     )
   ) %>%
@@ -2077,7 +2561,7 @@ results_train$action_log %>%
   )
 ```
 
-##20.3 Emergency movements
+## .3 Emergency movements
 
 ```{r plot-emergency}
 results_train$action_log %>%
@@ -2093,63 +2577,48 @@ results_train$action_log %>%
   theme_minimal()
 ```
 
-##20.4 Co-location events
+## .4 MADDPG learning losses
 
-```{r plot-colocation}
-results_train$action_log %>%
+```{r plot-maddpg-losses}
+results_train$training_log%>%
+  pivot_longer(
+    cols=c(actor_loss,critic_loss),
+    names_to="loss_type",
+    values_to="loss"
+  )%>%
   mutate(
-    colocated = n_agents_same_cell > 1
-  ) %>%
-  count(step, colocated) %>%
-  filter(colocated) %>%
-  ggplot(aes(step, n)) +
-  geom_col() +
-  labs(
-    title = "Same-cell co-location events",
-    x = "Step",
-    y = "Agents experiencing co-location"
-  ) +
-  theme_minimal()
-```
-
-##20.5 Q-learning changes
-
-```{r plot-q-updates}
-results_train$q_log %>%
-  mutate(
-    period = ceiling(step / 25)
-  ) %>%
+    period=ceiling(step/25)
+  )%>%
   group_by(
     period,
     agent_id,
-    action
-  ) %>%
+    loss_type
+  )%>%
   summarise(
-    mean_abs_td_error =
-      mean(abs(td_error)),
-    .groups = "drop"
-  ) %>%
+    mean_loss=mean(loss),
+    .groups="drop"
+  )%>%
   ggplot(
     aes(
       period,
-      mean_abs_td_error,
-      colour = action
+      mean_loss,
+      colour=loss_type
     )
-  ) +
-  geom_line() +
-  facet_wrap(~ agent_id) +
+  )+
+  geom_line()+
+  facet_wrap(~agent_id,scales="free_y")+
   labs(
-    title = "Temporal-difference error through learning",
-    x = "25-step period",
-    y = "Mean absolute TD error",
-    colour = "Action"
-  ) +
+    title="MADDPG actor and critic losses through learning",
+    x="25-step period",
+    y="Mean loss",
+    colour="Loss"
+  )+
   theme_minimal()
 ```
 
-##20.6 Cell-level ecological ledger
+## .5 Cell-level ecological ledger
 
-This avoids hiding ecological dynamics inside one aggregate degradation percentage.
+This shows more details of the ecological dynamics, an insight that illustrates what is going on inside the aggregated degradation percentage.
 
 ```{r plot-cell-ledger}
 condition_numeric<-c(
@@ -2184,19 +2653,22 @@ results_train$cell_ledger %>%
   theme_minimal()
 ```
 
-#21. Independent replicate workflow
+# . Independent replicate workflow
 
-A continuous training trajectory and independent simulation replicates are not the same thing.
-
-This function creates genuinely independent runs by resetting both:
+We need a continuous training trajectory with independent simulation replicates.This function creates independent runs by resetting both:
 
 - the ecological landscape;
-- all six Q tables.
+- all actor and critic networks, target networks and replay memory.
 
 ```{r independent-replicates}
 get_parallel_workers<-function(max_workers=6L,reserve=2L){
   available<-as.integer(future::availableCores())
-  as.integer(max(1L,min(max_workers,max(1L,available-reserve))))
+  as.integer(
+    max(
+      1L,
+      min(max_workers,max(1L,available-reserve))
+    )
+  )
 }
 
 run_independent_replicates<-function(
@@ -2216,13 +2688,22 @@ run_independent_replicates<-function(
   if(is.null(workers)){
     workers<-get_parallel_workers()
   }
+
   workers<-as.integer(max(1L,workers))
-  message("Running ",n_runs," independent simulations on ",workers," workers.")
+
+  message(
+    "Running ",
+    n_runs,
+    " independent MADDPG simulations on ",
+    workers,
+    " workers."
+  )
 
   future::plan(
     future::multisession,
     workers=workers
   )
+
   on.exit(
     future::plan(future::sequential),
     add=TRUE
@@ -2231,9 +2712,14 @@ run_independent_replicates<-function(
   furrr::future_map_dfr(
     seq_len(n_runs),
     function(run_id){
+      # Each replicate constructs new actors, critics, target networks
+      # and a new replay buffer inside simulate_marl().
       res<-simulate_marl(
         steps=steps,
-        seed=seed_start+run_id
+        seed=seed_start+run_id,
+        train=TRUE,
+        explore=TRUE,
+        return_maddpg=FALSE
       )
 
       res$landscape_counts%>%
@@ -2241,14 +2727,15 @@ run_independent_replicates<-function(
     },
     .options=furrr::furrr_options(
       seed=TRUE,
-      scheduling=1
+      scheduling=1,
+      packages=c("torch","tidyverse","purrr")
     )
   )
 }
 
 replicate_degradation<-run_independent_replicates(
   n_runs=20L,
-  steps=250L,
+  steps=500L,
   seed_start=2000L
 )
 ```
@@ -2275,9 +2762,79 @@ replicate_degradation %>%
     linewidth = 1
   ) +
   labs(
-    #title = "TEST: independent runs are separate learning/ecological realizations",
+    title = "TEST: independent runs are done correctly",
     y = "Number of degraded cells"
   ) +
   theme_minimal()
+```
+```{r action mix visualisation, include=FALSE}
+# ============================================================
+# ACTION MIX UNDER DIFFERENT PES LEVELS
+# ============================================================
+
+action_order<-c("<200","200-400","400-600",">600")
+
+action_cols<-c(
+  "<200"="#F3B6C6",
+  "200-400"="#D77FB3",
+  "400-600"="#A64F9E",
+  ">600"="#5B2A86"
+)
+
+base_pes_payment<-pes_payment
+
+run_pes_level<-function(multiplier,steps=500L,seed=128L){
+  pes_payment<<-base_pes_payment*multiplier
+
+  res<-simulate_marl(
+    steps=steps,
+    seed=seed,
+    train=TRUE,
+    explore=TRUE
+  )
+
+  res$action_log%>%
+    mutate(pes_multiplier=multiplier)
+}
+#A small PES grid
+pes_action_runs<-map_dfr(
+  c(0.5,1,1.5),
+  run_pes_level
+)
+
+pes_payment<-base_pes_payment
+
+action_mix_pes<-pes_action_runs%>%
+  mutate(
+    setting=case_when(
+      pes_multiplier==0.5~"Low PES",
+      pes_multiplier==1~"Baseline",
+      pes_multiplier==1.5~"High PES"
+    ),
+    setting=factor(setting,levels=c("Low PES","Baseline","High PES")),
+    action=factor(action,levels=action_order)
+  )%>%
+  count(setting,step,action,name="n")%>%
+  group_by(setting,step)%>%
+  mutate(prop=n/sum(n))%>%
+  ungroup()
+
+p_action_pes<-ggplot(action_mix_pes,aes(step,prop,fill=action))+
+  geom_area()+
+  facet_grid(setting~.)+
+  scale_fill_manual(values=action_cols,drop=FALSE)+
+  scale_y_continuous(
+    limits=c(0,1),
+    labels=scales::percent_format(accuracy=1)
+  )+
+  labs(
+    x="Iteration",
+    y="Proportion of actions",
+    fill="Stocking action",
+    title="MADDPG action mix under different PES levels"
+  )+
+  theme_minimal()
+
+p_action_pes
 ```
 

@@ -1,0 +1,3046 @@
+---
+title: "Herder Rangeland MARL — MADDPG, Outcome-based PES and Stock Survival"
+author: "Khorloo Batpurev"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+
+> **Learning-algorithm conversion note.** This file preserves the original Outcome-PES reward rule, movement rules and transition table from its source Rmd. The learning layer is replaced by discrete-action MADDPG with one decentralised actor and one centralised critic per herder, masked straight-through Gumbel-Softmax, joint replay memory and Polyak target networks. The `state_pes` vector is the starting calibration inherited from the source model and should be re-equalised against the corresponding Action-PES MADDPG model before comparative sensitivity analysis.
+
+#Multi-agent Reinforcement Learning for Outcome based PES design 
+
+
+Outcome based PES rewards the ecological state produced after a stocking decision. The action remains the chosen herd-size category, while the PES component is conditioned on the resulting EMA-defined rangeland condition. For action-based PES and no PES, there are separate Rmds. 
+
+This is a simplified version with 6 agents and 25cells(5x5). Each agent has 2 designated pastures that they switch between each iteration. In an emergency they are allowed to choose a third pasture,that is not a designated pasture of someone else's. Co-location has a 0.7 penalty, so there is incentive to avoid overlapping with other agents in the same cell(pasture). Because simulation would be expensive on a continuous herd size, the model for now has four stocking categories as actions.Agents can't change herd size dramatically between two iterations,and hence there is an adjacent-category constraint:an agent may stay in the same category or move by one category per iteration, but cannot jump directly from`<200`to`>600`or vice versa. There is a 5 year ecosystem memory with an exponential decay weight(last year's condition is the most influential on this year's). Information sharing is only for the purpose of estimating neighbourhood density, which then enables agents to avoid a co-location penalty. 
+
+MADDPG assumptions: each herder has a decentralised actor that observes only its own local observation. Training uses one centralised critic per herder, with each critic observing the joint observations and joint actions of all six agents. The four original stocking categories and adjacent-category constraint are retained through masked straight-through Gumbel-Softmax action selection.
+
+##Model definition
+
+The ecological environment, movement rules, stocking categories, stock-survival function, co-location penalty and emergency costs are unchanged from the corresponding Q-learning Outcome-PES model. Only the learning architecture is replaced.
+
+For each agent \(i\), the local observation is
+
+\[
+o_{i,t}=(\text{current cell},\text{rangeland condition},\text{weather},\text{neighbour density},\text{previous action}).
+\]
+
+The categorical components are one-hot encoded. Each herder has a decentralised actor \(\pi_i(o_i;\theta_i)\) that outputs four stocking-action logits. The same/adjacent stocking constraint is applied as a hard action mask. During training, masked straight-through Gumbel-Softmax produces a discrete realised stocking action while retaining an approximate gradient through the action choice.
+
+Training is centralised and execution is decentralised. Agent \(i\)'s critic observes the joint observations and joint actions of all six herders,
+
+\[
+Q_i(o_1,\ldots,o_N,a_1,\ldots,a_N;\phi_i),
+\]
+
+while its actor receives only \(o_i\). Joint transitions are stored in replay memory, critics are trained from TD targets, actors are trained to maximise their own centralised critic, and target networks are updated by Polyak averaging.
+
+Outcome-based PES is calculated after the ecological transition: livestock income depends on the current condition \(C_t\), while `state_pes_reward` depends on the resulting EMA-defined condition \(C_{t+1}\). The reward equation and all ecological dynamics are otherwise unchanged.
+
+##  Spatial rules
+
+
+- There are six agents and 25 cells.
+- Each agent has two unique designated cells.
+- Under ordinary conditions, the agent alternates deterministically between its two designated cells.
+- Emergency movement is activated only when:
+    1. current weather is drought; and
+    2. both designated cells are degraded.
+- An emergency destination:
+    - cannot be any agent's designated cell;
+    - must be ecologically better than both designated cells;
+    - incurs travel and social costs.
+- Travel and social costs receive equal weight: 0.5 + 0.5.
+- Social cost measures passage through other agents' designated cells on the route to the emergency destination.
+- If multiple agents occupy the same destination cell, their rewards receive a co-location penalty.
+
+## Information sharing
+
+
+All agents observe a shared public ledger containing the current locations and current herd sizes of all other agents. This information is used to calculate neighbour density. The shared ledger is deliberately simple in this version.
+
+## Ecological memory
+
+
+Every cell carries its own persistent 5-step exponential moving average (EMA) of ecological degradation severity. The stochastic ecological signal is drawn from the CSV-derived transition kernel in Step 5, which now permits constrained recovery as well as deterioration. This includes unassigned cells: if an emergency herder grazed a cell several iterations earlier, that legacy remains in the cell EMA and fades exponentially rather than being reset when the cell is ungrazed. The newest transition outcome receives the largest weight. The EMA defines the categorical `rangeland_condition` observed by agents. If one simulation step represents one year, this is approximately a five-year ecological memory; if one step represents a season, it is a five-season memory.
+
+#1. Setup
+
+```{r setup}
+
+rm(list=ls(envir=.GlobalEnv,all.names=TRUE),envir=.GlobalEnv)
+gc()
+
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(torch)
+set.seed(128)
+torch_manual_seed(128)
+#Grid
+grid_nx<-5L
+grid_ny<-5L
+#Rangeland degradation severity from best to worst
+r_states<-c("intact","good","poor","degraded")
+degradation_score<-c(intact=0,good=1,poor=2,degraded=3)
+#Four discrete stocking-rate actions
+actions<-c("<200","200-400","400-600",">600")
+#"none" is an ecological pressure category only
+ecological_footprints<-c("none",actions)
+#Representative herd size used for information sharing and combined pressure
+action_herd_size<-c("<200"=100,"200-400"=300,"400-600"=500,">600"=700)
+#Starting stocking categories are placeholders
+initial_actions<-c(A1="<200",A2="200-400",A3="200-400",A4="400-600",A5="400-600",A6=">600")
+#Direct herd income before survival adjustment
+herd_income<-c("<200"=0.8,"200-400"=2.0,"400-600"=2.5,">600"=3.5)
+#Outcome-based PES from absolute resulting EMA-defined rangeland condition
+state_pes<-c(intact=7.68,good=5.38,poor=0,degraded=0) #this is to match the total investment with action based design!This was calculated based on action based PES budget and equalised. Note that this reward is different to the empirically derived TT model rewards! 
+#Expected stock survival by current rangeland condition and stocking action
+stock_survival<-matrix(
+  c(
+    0.98,0.95,0.94,0.93,#intact
+    0.96,0.94,0.93,0.92,#good
+    0.84,0.83,0.8,0.7,#poor
+    0.83,0.8,0.7,0.6#degraded
+  ),
+  nrow=4,
+  byrow=TRUE,
+  dimnames=list(r_states,actions)
+)
+#Weather. This gets changed in the sensitivity test to different frequencies
+weather_prob<-c(drought=0.30,normal=0.50,wet=0.20)
+
+#MADDPG hyperparameters
+gamma<-0.95
+actor_lr<-1e-3
+critic_lr<-2e-3
+gumbel_tau<-1.00
+target_tau<-0.01
+batch_size<-64L
+replay_capacity<-50000L
+learning_starts<-64L
+updates_per_step<-1L
+actor_hidden_dim<-128L
+critic_hidden_dim<-256L
+#Interaction penalty
+colocation_multiplier<-0.70
+#Emergency movement costs
+travel_cost_weight<-0.50
+social_cost_weight<-0.50
+emergency_cost_scale<-1.00
+#Ecosystem memory
+memory_window<-5L
+ema_alpha<-2/(memory_window+1)
+```
+
+```{r test-setup, include=FALSE}
+stopifnot(length(actions)==4)
+stopifnot(all(initial_actions%in%actions))
+stopifnot(abs(sum(weather_prob)-1)<1e-12)
+stopifnot(gamma>=0&&gamma<1)
+stopifnot(actor_lr>0)
+stopifnot(critic_lr>0)
+stopifnot(gumbel_tau>0)
+stopifnot(target_tau>0&&target_tau<=1)
+stopifnot(batch_size>=1)
+stopifnot(replay_capacity>=batch_size)
+stopifnot(learning_starts>=batch_size)
+stopifnot(ema_alpha>0&&ema_alpha<1)
+stopifnot(abs(travel_cost_weight+social_cost_weight-1)<1e-12)
+stopifnot(identical(dim(stock_survival),c(4L,4L)))
+stopifnot(all(stock_survival>=0&stock_survival<=1))
+stopifnot(identical(names(state_pes),r_states))
+stopifnot(all(is.finite(state_pes)))
+stopifnot(all(state_pes>=0))
+stopifnot(state_pes[["intact"]]>=state_pes[["good"]])
+stopifnot(state_pes[["good"]]>=state_pes[["poor"]])
+stopifnot(state_pes[["poor"]]>=state_pes[["degraded"]])
+
+tibble(
+  state=r_states,
+  state_pes=state_pes[r_states]
+)
+```
+
+```{r diagnostic-maddpg-outcome-calibration, include=FALSE}
+# This chunk does not alter the model. It records the nominal starting
+# Outcome-PES vector inherited from the Q-learning version. Because MADDPG can
+# learn a different action mix, this vector must be re-calibrated against the
+# corresponding Action-PES MADDPG model before comparative sensitivity runs.
+nominal_state_pes<-tibble(
+  state=names(state_pes),
+  payment=as.numeric(state_pes)
+)
+nominal_state_pes
+```
+
+#2. Create the 5 × 5 landscape
+
+Cells are indexed from 1 to 25. All cells begin intact.
+
+```{r create-grid}
+make_land_grid<-function() {
+  expand_grid(
+    y = 0:(grid_ny - 1),
+    x = 0:(grid_nx - 1)
+  ) %>%
+    arrange(y, x) %>%
+    mutate(
+      cell_id = row_number(),
+      rangeland_condition = "intact",
+      condition_ema_score = unname(degradation_score["intact"])
+    ) %>%
+    select(cell_id, x, y, rangeland_condition, condition_ema_score)
+}
+land_grid_initial<-make_land_grid()
+```
+
+```{r test-grid, include=FALSE}
+stopifnot(nrow(land_grid_initial) == 25)
+stopifnot(n_distinct(land_grid_initial$cell_id) == 25)
+ggplot(land_grid_initial, aes(x, y, label = cell_id)) +
+  geom_tile(fill = "white", colour = "grey50") +
+  geom_text() +
+  coord_equal() +
+  scale_y_reverse() +
+  labs(title = "TEST: 5 × 5 cell indexing") +
+  theme_minimal()
+```
+
+#3. Assign two designated cells to each of six agents
+
+The 12 designated cells are unique. This means normal movement does not create accidental overlap simply because two agents own the same designated cell.
+
+```{r designated-cells}
+designated_cells<-tribble(
+  ~agent_id, ~slot, ~cell_id,
+  "A1", 1L,  1L,
+  "A1", 2L,  7L,
+  "A2", 1L,  5L,
+  "A2", 2L,  9L,
+  "A3", 1L, 21L,
+  "A3", 2L, 17L,
+  "A4", 1L, 25L,
+  "A4", 2L, 19L,
+  "A5", 1L, 11L,
+  "A5", 2L, 12L,
+  "A6", 1L, 14L,
+  "A6", 2L, 15L
+)
+designated_lookup<-designated_cells %>%
+  arrange(agent_id, slot) %>%
+  group_by(agent_id) %>%
+  summarise(
+    cell_1 = first(cell_id),
+    cell_2 = last(cell_id),
+    .groups = "drop"
+  )
+designated_owner<-designated_cells %>%
+  distinct(cell_id, agent_id)
+unassigned_cells<-setdiff(
+  land_grid_initial$cell_id,
+  designated_cells$cell_id
+)
+```
+
+```{r test-designated-cells, include=FALSE}
+stopifnot(n_distinct(designated_cells$cell_id) == 12)
+stopifnot(length(unassigned_cells) == 13)
+land_grid_initial %>%
+  left_join(designated_owner, by = "cell_id") %>%
+  mutate(agent_id = replace_na(agent_id, "Unassigned")) %>%
+  ggplot(aes(x, y, fill = agent_id, label = cell_id)) +
+  geom_tile(colour = "white") +
+  geom_text() +
+  coord_equal() +
+  scale_y_reverse() +
+  labs(
+    title = "TEST: designated and unassigned cells",
+    fill = "Owner"
+  ) +
+  theme_minimal()
+```
+
+#4. Weather
+
+Weather is exogenous and shared by the whole landscape at each time step.
+
+```{r weather}
+draw_weather<-function(n = 1L) {
+  sample(
+    names(weather_prob),
+    size = n,
+    replace = TRUE,
+    prob = weather_prob
+  )
+}
+```
+
+```{r test-weather, include=FALSE}
+set.seed(123)
+weather_test<-tibble(weather = draw_weather(10000))
+weather_test %>%
+  count(weather) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(weather, prop)) +
+  geom_col() +
+  geom_point(
+    data = tibble(
+      weather = names(weather_prob),
+      prop = as.numeric(weather_prob)
+    ),
+    aes(weather, prop),
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+  labs(
+    title = "TEST: empirical weather frequency",
+    subtitle = "Bars are simulated; points are target probabilities",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+```
+
+#5. Expert derived ecological transition model
+
+
+The expert derived transition table contains joint relationship between climate, stocking category, and three pasture outcomes; `intact`,`good`,`degraded`. There is no directly elicited `poor` state. We derive `poor` state by applying the exponential moving average (EMA) function, which produces a continuous number between 0 and 3. `poor` is assigned for values between 1.5 and 2.5. 
+
+Due to time limitations on experts' time and cognitive load, not all starting conditions for the full transition table was possible to be elicited in the field. Only the starting condition `intact` is fully elicited. The remaining starting conditions (good, poor and degraded) are therefore are derived from the `intact` starting condition values i.e. purely assumption based at this stage.
+
+The missing current-condition rows are constructed as follows for each action x weather combination:
+
+\[
+\mathbf p_G=\frac{2}{3}\mathbf p_I+\frac{1}{3}\mathbf p_D,
+\]
+
+and
+
+\[
+\mathbf p_P^{raw}=\frac{1}{3}\mathbf p_G+\frac{2}{3}\mathbf p_D.
+\]
+
+For current `poor` and `degraded` conditions, a direct transition signal to `intact` is prohibited. Any raw `intact` mass in the `poor` interpolation is transferred to `good`. Thus recovery from `poor` or `degraded` occurs through `good` rather than jumping directly to `intact`.
+
+For a currently degraded cell:
+
+- under `wet` + `none`, degraded -> good recovery probability is 0.80;
+- under `wet` + `<200`, recovery is 0.50;
+- under `wet` + `>600`, recovery is 0.01;
+- `wet` + `200-400` and `400-600` are interpolated using the empirical action gradient in `1-P(degraded)` from the CSV;
+- under `normal` + `none`, recovery is 0.66;
+- under `drought` + `none`, recovery is 0.01;
+- under `normal` or `drought` with any positive grazing category, a degraded cell remains degraded with probability 1.
+
+For `none`, which is also absent from the elicitation, we have also made assumptions for now as a placeholder; intact-start persistence anchors are 0.99 under `wet` and `normal` and 0.01 under `drought`. The remaining probability is split between `good` and `degraded` using the same-weather `<200` empirical good:degraded ratio.
+
+```{r base-transition}
+#Empirical joint weather x stocking transition probabilities. These are the mean of 140 individual estimates. 
+climate_transition_source<-tribble(
+  ~weather,~action,~intact,~good,~degraded,
+  "wet","<200",0.8665,0.0963,0.0372,
+  "wet","200-400",0.7425,0.1576,0.0999,
+  "wet","400-600",0.5945,0.2278,0.1777,
+  "wet",">600",0.4349,0.2689,0.2962,
+  "normal","<200",0.7438,0.1837,0.0725,
+  "normal","200-400",0.5856,0.2404,0.1740,
+  "normal","400-600",0.3926,0.2906,0.3168,
+  "normal",">600",0.2581,0.2811,0.4608,
+  "drought","<200",0.4906,0.3077,0.2017,
+  "drought","200-400",0.3481,0.3067,0.3452,
+  "drought","400-600",0.2327,0.2730,0.4943,
+  "drought",">600",0.1261,0.2255,0.6484
+)
+transition_signal_states<-c("intact","good","degraded")
+make_prob_vector<-function(intact,good,degraded){
+  p<-c(intact=intact,good=good,poor=0,degraded=degraded)
+  if(any(!is.finite(p))||any(p<0)||any(p>1)||abs(sum(p)-1)>1e-10){
+    stop("Invalid ecological transition probability vector.")
+  }
+  p
+}
+empirical_intact_prob<-function(action,weather){
+  stopifnot(action%in%actions,weather%in%names(weather_prob))
+  row<-climate_transition_source[
+    climate_transition_source$action==action&
+      climate_transition_source$weather==weather,
+    ,drop=FALSE
+  ]
+  if(nrow(row)!=1L)stop("Expected one empirical action x weather row.")
+  make_prob_vector(row$intact[[1]],row$good[[1]],row$degraded[[1]])
+}
+#Explicit no-grazing anchors for an intact current condition.
+none_intact_persistence<-c(wet=0.99,normal=0.99,drought=0.01)
+make_none_intact_prob<-function(weather){
+  stopifnot(weather%in%names(weather_prob))
+  p_intact<-unname(none_intact_persistence[[weather]])
+  reference<-empirical_intact_prob("<200",weather)
+  residual<-1-p_intact
+  gd_total<-reference[["good"]]+reference[["degraded"]]
+  make_prob_vector(
+    intact=p_intact,
+    good=residual*reference[["good"]]/gd_total,
+    degraded=residual*reference[["degraded"]]/gd_total
+  )
+}
+intact_start_prob<-function(action,weather){
+  if(action=="none")make_none_intact_prob(weather) else empirical_intact_prob(action,weather)
+}
+#Wet recovery curve for a currently degraded grazed cell.
+wet_recovery_shape<-climate_transition_source%>%
+  filter(weather=="wet")%>%
+  mutate(recovery_favourability=1-degraded)%>%
+  arrange(match(action,actions))
+wet_fav_low<-wet_recovery_shape$recovery_favourability[
+  wet_recovery_shape$action==">600"
+]
+wet_fav_high<-wet_recovery_shape$recovery_favourability[
+  wet_recovery_shape$action=="<200"
+]
+wet_recovery_shape<-wet_recovery_shape%>%
+  mutate(
+    shape=(recovery_favourability-wet_fav_low)/(wet_fav_high-wet_fav_low),
+    degraded_to_good=0.01+shape*(0.50-0.01)
+  )
+degraded_none_recovery<-c(wet=0.80,normal=0.66,drought=0.01)
+degraded_recovery_prob<-function(action,weather){
+  stopifnot(action%in%ecological_footprints,weather%in%names(weather_prob))
+  if(action=="none")return(unname(degraded_none_recovery[[weather]]))
+  if(weather!="wet")return(0)
+  row<-wet_recovery_shape[wet_recovery_shape$action==action,,drop=FALSE]
+  if(nrow(row)!=1L)stop("Expected one wet recovery row.")
+  row$degraded_to_good[[1]]
+}
+degraded_start_prob<-function(action,weather){
+  recovery<-degraded_recovery_prob(action,weather)
+  make_prob_vector(intact=0,good=recovery,degraded=1-recovery)
+}
+apply_recovery_constraint<-function(prob,current_condition){
+  stopifnot(current_condition%in%r_states)
+  if(current_condition%in%c("poor","degraded")){
+    prob[["good"]]<-prob[["good"]]+prob[["intact"]]
+    prob[["intact"]]<-0
+  }
+  if(any(prob<0)||any(prob>1)||abs(sum(prob)-1)>1e-10){
+    stop("Recovery constraint produced an invalid probability vector.")
+  }
+  prob
+}
+make_transition_matrix<-function(action,weather){
+  stopifnot(action%in%ecological_footprints,weather%in%names(weather_prob))
+  p_intact<-intact_start_prob(action,weather)
+  p_degraded<-apply_recovery_constraint(
+    degraded_start_prob(action,weather),
+    "degraded"
+  )
+  p_good<-(2/3)*p_intact+(1/3)*p_degraded
+  p_poor_raw<-(1/3)*p_good+(2/3)*p_degraded
+  p_poor<-apply_recovery_constraint(p_poor_raw,"poor")
+  M<-rbind(
+    intact=p_intact,
+    good=p_good,
+    poor=p_poor,
+    degraded=p_degraded
+  )
+  M<-M[r_states,r_states,drop=FALSE]
+  if(any(!is.finite(M))||any(M<0)||any(M>1)||any(abs(rowSums(M)-1)>1e-10)){
+    stop("Invalid ecological transition matrix.")
+  }
+  M
+}
+base_transition<-setNames(
+  lapply(ecological_footprints,function(a){
+    setNames(
+      lapply(names(weather_prob),function(w){make_transition_matrix(a,w)}),
+      names(weather_prob)
+    )
+  }),
+  ecological_footprints
+)
+sample_next_condition<-function(current_condition,action,weather){
+  transition_matrix<-base_transition[[action]][[weather]]
+  probabilities<-transition_matrix[current_condition,,drop=TRUE]
+  sample(names(probabilities),size=1,prob=probabilities)
+}
+```
+
+```{r test-base-transition, include=FALSE}
+stopifnot(exists("base_transition"),is.list(base_transition))
+stopifnot(identical(names(base_transition),ecological_footprints))
+stopifnot(all(abs(climate_transition_source$intact+climate_transition_source$good+climate_transition_source$degraded-1)<1e-10))
+for(a in ecological_footprints){
+  for(w in names(weather_prob)){
+    M<-base_transition[[a]][[w]]
+    stopifnot(is.matrix(M),identical(dim(M),c(4L,4L)))
+    stopifnot(identical(rownames(M),r_states),identical(colnames(M),r_states))
+    stopifnot(all(is.finite(M)),all(M>=0&M<=1),all(abs(rowSums(M)-1)<1e-10))
+    #Poor is an EMA-only persistent state, never a directly sampled signal.
+    stopifnot(all(M[,"poor"]==0))
+    #Poor/degraded cannot jump directly to an intact signal.
+    stopifnot(M["poor","intact"]==0,M["degraded","intact"]==0)
+    #Good is the agreed 2/3 intact + 1/3 degraded interpolation.
+    stopifnot(max(abs(M["good",]-(2/3*M["intact",]+1/3*M["degraded",])))<1e-10)
+    #Poor starts from 1/3 good + 2/3 degraded, then intact mass moves to good.
+    poor_raw<-1/3*M["good",]+2/3*M["degraded",]
+    poor_expected<-poor_raw
+    poor_expected["good"]<-poor_expected["good"]+poor_expected["intact"]
+    poor_expected["intact"]<-0
+    stopifnot(max(abs(M["poor",]-poor_expected))<1e-10)
+  }
+}
+#The four grazed intact-start rows reproduce the embedded CSV exactly.
+for(i in seq_len(nrow(climate_transition_source))){
+  row<-climate_transition_source[i,]
+  expected<-make_prob_vector(row$intact,row$good,row$degraded)
+  observed<-base_transition[[row$action]][[row$weather]]["intact",]
+  stopifnot(max(abs(expected-observed))<1e-10)
+}
+#Explicit no-grazing anchors.
+stopifnot(abs(base_transition[["none"]][["rainy"]]["intact","intact"]-0.99)<1e-12)
+stopifnot(abs(base_transition[["none"]][["normal"]]["intact","intact"]-0.99)<1e-12)
+stopifnot(abs(base_transition[["none"]][["drought"]]["intact","intact"]-0.01)<1e-12)
+stopifnot(abs(base_transition[["none"]][["rainy"]]["degraded","good"]-0.80)<1e-12)
+stopifnot(abs(base_transition[["none"]][["normal"]]["degraded","good"]-0.66)<1e-12)
+stopifnot(abs(base_transition[["none"]][["drought"]]["degraded","good"]-0.01)<1e-12)
+#Explicit rainy degraded-recovery anchors and CSV-shaped middle actions.
+stopifnot(abs(base_transition[["<200"]][["rainy"]]["degraded","good"]-0.50)<1e-12)
+stopifnot(abs(base_transition[[">600"]][["rainy"]]["degraded","good"]-0.01)<1e-12)
+stopifnot(
+  base_transition[["200-400"]][["rainy"]]["degraded","good"]<0.50,
+  base_transition[["200-400"]][["rainy"]]["degraded","good"]>
+    base_transition[["400-600"]][["rainy"]]["degraded","good"],
+  base_transition[["400-600"]][["rainy"]]["degraded","good"]>0.01
+)
+#With positive grazing, degraded recovery is prohibited under normal/drought.
+for(a in actions){
+  stopifnot(base_transition[[a]][["normal"]]["degraded","degraded"]==1)
+  stopifnot(base_transition[[a]][["drought"]]["degraded","degraded"]==1)
+}
+#Compact inspectable table for all 15 matrices.
+transition_probability_table<-map_dfr(ecological_footprints,function(a){
+  map_dfr(names(weather_prob),function(w){
+    M<-base_transition[[a]][[w]]
+    as.data.frame(as.table(M))%>%
+      setNames(c("current_condition","transition_signal","probability"))%>%
+      mutate(action=a,weather=w,.before=1)
+  })
+})
+stopifnot(nrow(transition_probability_table)==5*3*4*4)
+```
+
+#6. Five-step ecosystem memory
+
+This is **cell-level ecological memory**, not agent reward/spatial memory. Every one of the 25 cells stores its own persistent EMA, including cells that are currently ungrazed or unassigned.
+
+For the ecological update to time \(t+1\), first draw a stochastic transition outcome \(z_{t+1}\) from the base transition using \(C_t\), \(A_t\), and \(W_{t+1}\). Then update the cell EMA:
+
+\[
+E_{t+1} =
+\alpha_E z_{t+1} +
+(1-\alpha_E)E_t.
+\]
+
+The newest outcome receives weight \(\alpha_E\); older ecological history decays geometrically. The categorical `rangeland_condition` observed by the agents is then defined from the EMA thresholds. Thus EMA is not an additional actor-observation component; it is the mechanism that defines the rangeland-condition component already present in the local observation.
+
+```{r ecosystem-memory}
+condition_from_ema<-function(x){
+  case_when(
+    x<0.5~"intact",
+    x<1.5~"good",
+    x<2.5~"poor",
+    TRUE~"degraded"
+  )
+}
+update_cell_memory<-function(old_ema,transition_outcome,alpha=ema_alpha){
+  outcome_score<-unname(degradation_score[[transition_outcome]])
+  new_ema<-alpha*outcome_score+(1-alpha)*old_ema
+  list(ema_score=new_ema,condition=condition_from_ema(new_ema))
+}
+```
+
+```{r test-ecosystem-memory, include=FALSE}
+outcomes<-c("degraded","good","good","good","good")
+ema_value<-0
+memory_test<-map_dfr(seq_along(outcomes),function(t){
+  ans<-update_cell_memory(old_ema=ema_value,transition_outcome=outcomes[t])
+  ema_value<<-ans$ema_score
+  tibble(step=t,transition_outcome=outcomes[t],ema_score=ans$ema_score,condition=ans$condition)
+})
+stopifnot(memory_test$ema_score[1]>0)
+stopifnot(all(memory_test$ema_score>0))
+stopifnot(abs(ema_alpha-1/3)<1e-12)
+memory_test
+```
+
+#7. Agent objects and actor/critic networks
+
+Each agent has its own actor/critic network. All agents start with the same learning parameters in this basic version.
+
+```{r create-agents}
+create_agent<-function(
+    agent_id,
+    initial_action=initial_actions[[agent_id]]
+){
+  stopifnot(initial_action%in%actions)
+
+  first_cell<-designated_lookup%>%
+    filter(.data$agent_id==.env$agent_id)%>%
+    pull(cell_1)
+
+  list(
+    id=agent_id,
+    current_cell=first_cell,
+    previous_action=initial_action,
+    herd_size=unname(action_herd_size[[initial_action]])
+  )
+}
+
+agents_initial<-setNames(
+  lapply(
+    names(initial_actions),
+    function(id){
+      create_agent(
+        agent_id=id,
+        initial_action=initial_actions[[id]]
+      )
+    }
+  ),
+  names(initial_actions)
+)
+
+actor_network<-nn_module(
+  "ActorNetwork",
+  initialize=function(obs_dim,action_dim,hidden_dim=128L){
+    self$net<-nn_sequential(
+      nn_linear(obs_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,action_dim)
+    )
+  },
+  forward=function(x){
+    self$net(x)
+  }
+)
+
+critic_network<-nn_module(
+  "CentralisedCritic",
+  initialize=function(joint_obs_dim,joint_action_dim,hidden_dim=256L){
+    self$net<-nn_sequential(
+      nn_linear(joint_obs_dim+joint_action_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,hidden_dim),
+      nn_relu(),
+      nn_linear(hidden_dim,1L)
+    )
+  },
+  forward=function(joint_obs,joint_action){
+    self$net(torch_cat(list(joint_obs,joint_action),dim=2))
+  }
+)
+
+copy_module_state<-function(target,source){
+  target$load_state_dict(source$state_dict())
+  invisible(target)
+}
+
+new_replay_buffer<-function(capacity=replay_capacity){
+  buffer<-new.env(parent=emptyenv())
+  buffer$capacity<-as.integer(capacity)
+  buffer$size<-0L
+  buffer$position<-1L
+  buffer$obs<-vector("list",buffer$capacity)
+  buffer$actions<-vector("list",buffer$capacity)
+  buffer$rewards<-vector("list",buffer$capacity)
+  buffer$next_obs<-vector("list",buffer$capacity)
+  buffer$masks<-vector("list",buffer$capacity)
+  buffer$next_masks<-vector("list",buffer$capacity)
+  buffer$done<-vector("list",buffer$capacity)
+  buffer
+}
+
+replay_add<-function(
+    buffer,
+    obs,
+    action_onehot,
+    rewards,
+    next_obs,
+    masks,
+    next_masks,
+    done=0
+){
+  i<-buffer$position
+
+  buffer$obs[[i]]<-as.vector(t(obs))
+  buffer$actions[[i]]<-as.vector(t(action_onehot))
+  buffer$rewards[[i]]<-as.numeric(rewards)
+  buffer$next_obs[[i]]<-as.vector(t(next_obs))
+  buffer$masks[[i]]<-as.vector(t(masks))
+  buffer$next_masks[[i]]<-as.vector(t(next_masks))
+  buffer$done[[i]]<-as.numeric(done)
+
+  buffer$size<-min(buffer$size+1L,buffer$capacity)
+  buffer$position<-if(i>=buffer$capacity)1L else i+1L
+
+  invisible(buffer)
+}
+
+replay_sample<-function(buffer,n=batch_size){
+  stopifnot(buffer$size>=n)
+  idx<-sample.int(buffer$size,n,replace=FALSE)
+
+  stack_field<-function(field){
+    do.call(
+      rbind,
+      lapply(idx,function(i)buffer[[field]][[i]])
+    )
+  }
+
+  list(
+    obs=stack_field("obs"),
+    actions=stack_field("actions"),
+    rewards=stack_field("rewards"),
+    next_obs=stack_field("next_obs"),
+    masks=stack_field("masks"),
+    next_masks=stack_field("next_masks"),
+    done=matrix(
+      unlist(lapply(idx,function(i)buffer$done[[i]])),
+      ncol=1
+    )
+  )
+}
+```
+
+```{r test-agents, include=FALSE}
+stopifnot(length(agents_initial)==6)
+stopifnot(all(vapply(agents_initial,is.list,logical(1))))
+stopifnot(all(
+  vapply(
+    agents_initial,
+    function(a)a$previous_action%in%actions,
+    logical(1)
+  )
+))
+stopifnot(all(
+  vapply(
+    agents_initial,
+    function(a)a$herd_size>0,
+    logical(1)
+  )
+))
+
+replay_test<-new_replay_buffer(10L)
+stopifnot(replay_test$size==0L)
+```
+
+#8. Shared information for neighbourhood density estimation
+
+The public information ledger contains:
+
+- agent identity;
+- current cell;
+- coordinates;
+- previous action;
+- current herd size.
+
+Neighbour density is the number of **other** agents in the Moore neighbourhood of the focal agent (one-cell radius in x and y).
+
+```{r information-sharing}
+share_agent_information<-function(
+    agents,
+    land_grid
+) {
+  map_dfr(
+    agents,
+    function(agent) {
+      loc<-land_grid %>%
+        filter(cell_id == agent$current_cell)
+      tibble(
+        agent_id = agent$id,
+        current_cell = agent$current_cell,
+        x = loc$x,
+        y = loc$y,
+        previous_action = agent$previous_action,
+        herd_size = agent$herd_size
+      )
+    }
+  )
+}
+compute_neighbour_density<-function(
+    agent_id,
+    shared_info,
+    radius = 1L
+) {
+  focal<-shared_info %>%
+    filter(.data$agent_id==.env$agent_id)
+  others<-shared_info %>%
+    filter(.data$agent_id!=.env$agent_id)
+  sum(
+    abs(others$x - focal$x) <= radius &
+      abs(others$y - focal$y) <= radius
+  )
+}
+```
+
+```{r test-information-sharing, include=FALSE}
+shared_test<-share_agent_information(
+  agents_initial,
+  land_grid_initial
+)
+density_test<-shared_test %>%
+  mutate(
+    neighbour_density = map_int(
+      agent_id,
+      compute_neighbour_density,
+      shared_info = shared_test
+    )
+  )
+stopifnot(all(
+  density_test$neighbour_density >= 0 &
+    density_test$neighbour_density <= 5
+))
+ggplot(
+  density_test,
+  aes(x, y, size = herd_size, label = agent_id)
+) +
+  geom_point() +
+  geom_text(nudge_y = -0.25) +
+  coord_equal() +
+  scale_y_reverse() +
+  labs(
+    title = "TEST: public information-sharing ledger",
+    subtitle = "Point size represents currently observed herd size"
+  ) +
+  theme_minimal()
+```
+
+#9. Local observation encoding
+
+The exact state requested for policy learning is
+
+\[
+(
+\text{current cell},
+\text{rangeland condition},
+\text{weather},
+\text{neighbour density},
+\text{previous action}
+).
+\]
+
+```{r state-encoding}
+encode_state<-function(
+    current_cell,
+    rangeland_condition,
+    weather,
+    neighbour_density,
+    previous_action
+){
+  paste(
+    paste0("cell=",current_cell),
+    paste0("land=",rangeland_condition),
+    paste0("weather=",weather),
+    paste0("neigh=",neighbour_density),
+    paste0("prev=",previous_action),
+    sep="|"
+  )
+}
+
+one_hot_numeric<-function(value,levels){
+  as.numeric(levels==value)
+}
+
+observation_dim<-
+  grid_nx*grid_ny+
+  length(r_states)+
+  length(weather_prob)+
+  6L+
+  length(actions)
+
+encode_observation<-function(
+    current_cell,
+    rangeland_condition,
+    weather,
+    neighbour_density,
+    previous_action
+){
+  c(
+    one_hot_numeric(current_cell,seq_len(grid_nx*grid_ny)),
+    one_hot_numeric(rangeland_condition,r_states),
+    one_hot_numeric(weather,names(weather_prob)),
+    one_hot_numeric(neighbour_density,0:5),
+    one_hot_numeric(previous_action,actions)
+  )
+}
+
+observe_agent_state<-function(
+    agent,
+    land_grid,
+    weather,
+    shared_info
+){
+  current_condition<-land_grid%>%
+    filter(cell_id==agent$current_cell)%>%
+    pull(rangeland_condition)
+
+  neighbour_density<-compute_neighbour_density(
+    agent_id=agent$id,
+    shared_info=shared_info
+  )
+
+  encode_state(
+    current_cell=agent$current_cell,
+    rangeland_condition=current_condition,
+    weather=weather,
+    neighbour_density=neighbour_density,
+    previous_action=agent$previous_action
+  )
+}
+
+observe_agent_vector<-function(
+    agent,
+    land_grid,
+    weather,
+    shared_info
+){
+  current_condition<-land_grid%>%
+    filter(cell_id==agent$current_cell)%>%
+    pull(rangeland_condition)
+
+  neighbour_density<-compute_neighbour_density(
+    agent_id=agent$id,
+    shared_info=shared_info
+  )
+
+  encode_observation(
+    current_cell=agent$current_cell,
+    rangeland_condition=current_condition,
+    weather=weather,
+    neighbour_density=neighbour_density,
+    previous_action=agent$previous_action
+  )
+}
+
+create_maddpg_system<-function(agent_ids=names(initial_actions)){
+  n_agents<-length(agent_ids)
+  action_dim<-length(actions)
+
+  joint_obs_dim<-n_agents*observation_dim
+  joint_action_dim<-n_agents*action_dim
+
+  actors<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        actor_network(
+          obs_dim=observation_dim,
+          action_dim=action_dim,
+          hidden_dim=actor_hidden_dim
+        )
+      }
+    ),
+    agent_ids
+  )
+
+  target_actors<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        m<-actor_network(
+          obs_dim=observation_dim,
+          action_dim=action_dim,
+          hidden_dim=actor_hidden_dim
+        )
+        copy_module_state(m,actors[[id]])
+        m
+      }
+    ),
+    agent_ids
+  )
+
+  critics<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        critic_network(
+          joint_obs_dim=joint_obs_dim,
+          joint_action_dim=joint_action_dim,
+          hidden_dim=critic_hidden_dim
+        )
+      }
+    ),
+    agent_ids
+  )
+
+  target_critics<-setNames(
+    lapply(
+      agent_ids,
+      function(id){
+        m<-critic_network(
+          joint_obs_dim=joint_obs_dim,
+          joint_action_dim=joint_action_dim,
+          hidden_dim=critic_hidden_dim
+        )
+        copy_module_state(m,critics[[id]])
+        m
+      }
+    ),
+    agent_ids
+  )
+
+  actor_optimizers<-setNames(
+    lapply(
+      actors,
+      function(m)optim_adam(m$parameters,lr=actor_lr)
+    ),
+    agent_ids
+  )
+
+  critic_optimizers<-setNames(
+    lapply(
+      critics,
+      function(m)optim_adam(m$parameters,lr=critic_lr)
+    ),
+    agent_ids
+  )
+
+  list(
+    agent_ids=agent_ids,
+    actors=actors,
+    target_actors=target_actors,
+    critics=critics,
+    target_critics=target_critics,
+    actor_optimizers=actor_optimizers,
+    critic_optimizers=critic_optimizers,
+    updates=0L
+  )
+}
+```
+
+```{r test-state-encoding, include=FALSE}
+state_test<-map_chr(
+  agents_initial,
+  observe_agent_state,
+  land_grid=land_grid_initial,
+  weather="normal",
+  shared_info=shared_test
+)
+
+obs_test<-map(
+  agents_initial,
+  observe_agent_vector,
+  land_grid=land_grid_initial,
+  weather="normal",
+  shared_info=shared_test
+)
+
+stopifnot(length(state_test)==6)
+stopifnot(all(str_detect(state_test,"cell=")))
+stopifnot(all(str_detect(state_test,"land=")))
+stopifnot(all(str_detect(state_test,"weather=")))
+stopifnot(all(str_detect(state_test,"neigh=")))
+stopifnot(all(str_detect(state_test,"prev=")))
+stopifnot(all(map_int(obs_test,length)==observation_dim))
+stopifnot(all(map_dbl(obs_test,sum)==5))
+
+maddpg_test<-create_maddpg_system()
+stopifnot(length(maddpg_test$actors)==6)
+stopifnot(length(maddpg_test$critics)==6)
+```
+
+# 10. Gumbel-Softmax actor policy with stocking-category anchoring
+
+Action choice is based only on Q values for the currently observed state, but the feasible action set is constrained by the previous stocking category. The agent may stay in the same category or move one category up/down in one iteration. This is the discrete approximation to the intended short-run stocking-change constraint. There is no extra action bias and no agent reward-memory term.
+
+```{r gumbel-policy}
+allowed_actions<-function(previous_action){
+  switch(
+    previous_action,
+    "<200"=c("<200","200-400"),
+    "200-400"=c("<200","200-400","400-600"),
+    "400-600"=c("200-400","400-600",">600"),
+    ">600"=c("400-600",">600"),
+    stop("Unknown previous action: ",previous_action)
+  )
+}
+
+action_mask<-function(previous_action){
+  as.numeric(actions%in%allowed_actions(previous_action))
+}
+
+mask_logits_tensor<-function(logits,mask_tensor){
+  logits+(1-mask_tensor)*(-1e9)
+}
+
+select_action_actor<-function(
+    actor,
+    observation,
+    previous_action,
+    explore=TRUE,
+    temperature=gumbel_tau
+){
+  stopifnot(length(observation)==observation_dim)
+  stopifnot(previous_action%in%actions)
+
+  obs_tensor<-torch_tensor(
+    matrix(observation,nrow=1),
+    dtype=torch_float()
+  )
+
+  mask_vec<-action_mask(previous_action)
+
+  mask_tensor<-torch_tensor(
+    matrix(mask_vec,nrow=1),
+    dtype=torch_float()
+  )
+
+  actor$eval()
+
+  out<-with_no_grad({
+    logits<-actor(obs_tensor)
+    masked_logits<-mask_logits_tensor(logits,mask_tensor)
+    probabilities<-nnf_softmax(masked_logits,dim=2)
+
+    selected<-if(explore){
+      nnf_gumbel_softmax(
+        masked_logits,
+        tau=temperature,
+        hard=TRUE,
+        dim=2
+      )
+    }else{
+      probabilities
+    }
+
+    list(
+      probabilities=probabilities,
+      selected=selected
+    )
+  })
+
+  probability_vector<-as.numeric(
+    as_array(out$probabilities$cpu())
+  )
+
+  selected_vector<-as.numeric(
+    as_array(out$selected$cpu())
+  )
+
+  chosen_index<-which.max(selected_vector)
+  chosen_action<-actions[[chosen_index]]
+
+  hard_one_hot<-rep(0,length(actions))
+  hard_one_hot[[chosen_index]]<-1
+
+  full_probabilities<-setNames(
+    probability_vector,
+    actions
+  )
+
+  list(
+    action=chosen_action,
+    action_index=chosen_index,
+    one_hot=hard_one_hot,
+    feasible_actions=allowed_actions(previous_action),
+    probabilities=full_probabilities
+  )
+}
+```
+
+```{r test-gumbel-policy, include=FALSE}
+stopifnot(identical(
+  allowed_actions("<200"),
+  c("<200","200-400")
+))
+stopifnot(!">600"%in%allowed_actions("<200"))
+stopifnot(!"<200"%in%allowed_actions(">600"))
+
+torch_manual_seed(99)
+policy_system_test<-create_maddpg_system()
+policy_obs_test<-observe_agent_vector(
+  agents_initial$A1,
+  land_grid_initial,
+  "normal",
+  shared_test
+)
+
+policy_result_test<-select_action_actor(
+  actor=policy_system_test$actors$A1,
+  observation=policy_obs_test,
+  previous_action="<200",
+  explore=TRUE
+)
+
+stopifnot(policy_result_test$action%in%c("<200","200-400"))
+stopifnot(policy_result_test$probabilities[[">600"]]<1e-8)
+stopifnot(abs(sum(policy_result_test$probabilities)-1)<1e-6)
+```
+
+# 11. Normal movement between two designated cells
+
+Normal location is deterministic: agents alternate between their two designated cells.
+
+```{r normal-movement}
+normal_cell_for_step<-function(
+    agent_id,
+    step
+) {
+  row<-designated_lookup %>%
+    filter(.data$agent_id==.env$agent_id)
+  if (step %% 2L == 1L) {
+    row$cell_1
+  } else {
+    row$cell_2
+  }
+}
+```
+
+```{r test-normal-movement, include=FALSE}
+expand_grid(
+  agent_id = paste0("A", 1:6),
+  step = 1:6
+) %>%
+  mutate(
+    cell_id = map2_int(
+      agent_id,
+      step,
+      normal_cell_for_step
+    )
+  ) %>%
+  ggplot(aes(step, cell_id, group = agent_id, colour = agent_id)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "TEST: deterministic alternation between two designated cells",
+    y = "Cell ID"
+  ) +
+  theme_minimal()
+```
+
+# 12. Emergency trigger and emergency destination
+
+The emergency gate is intentionally simple:
+
+\[
+\text{Emergency}_{i,t}
+=
+\mathbf{1}
+(
+W_t = \text{drought}
+\land
+C_{i,1} = \text{degraded}
+\land
+C_{i,2} = \text{degraded}
+).
+\]
+
+There is no stochastic mobility propensity in this basic version.
+
+##12.1 Straight-line route through the grid
+
+The route approximation is used only to calculate social trespass cost.
+
+```{r line-path}
+cells_on_straight_line<-function(
+    origin_cell,
+    destination_cell,
+    land_grid,
+    n_points = 101L
+) {
+  origin<-land_grid %>%
+    filter(cell_id == origin_cell)
+  destination<-land_grid %>%
+    filter(cell_id == destination_cell)
+  xs<-seq(origin$x, destination$x, length.out = n_points)
+  ys<-seq(origin$y, destination$y, length.out = n_points)
+  tibble(
+    x = round(xs),
+    y = round(ys)
+  ) %>%
+    distinct(x, y) %>%
+    left_join(
+      land_grid %>% select(cell_id, x, y),
+      by = c("x", "y")
+    ) %>%
+    filter(!is.na(cell_id)) %>%
+    pull(cell_id)
+}
+```
+
+```{r test-line-path, include=FALSE}
+line_test<-cells_on_straight_line(
+  origin_cell = 1,
+  destination_cell = 25,
+  land_grid = land_grid_initial
+)
+land_grid_initial %>%
+  mutate(on_path = cell_id %in% line_test) %>%
+  ggplot(aes(x, y, fill = on_path, label = cell_id)) +
+  geom_tile(colour = "white") +
+  geom_text() +
+  coord_equal() +
+  scale_y_reverse() +
+  labs(
+    title = "TEST: cells intersected by a straight-line emergency route",
+    fill = "On path"
+  ) +
+  theme_minimal()
+```
+
+##12.2 Travel and social costs
+
+Travel cost is normalized Euclidean distance.
+
+Social cost is the fraction of intermediate route cells that are designated to **another** agent.
+
+The destination itself must be unassigned, so social cost comes from crossing other people's pastures rather than occupying their designated destination.
+
+```{r emergency-cost}
+emergency_movement_cost<-function(
+    agent_id,
+    origin_cell,
+    destination_cell,
+    land_grid
+) {
+  origin<-land_grid %>%
+    filter(cell_id == origin_cell)
+  destination<-land_grid %>%
+    filter(cell_id == destination_cell)
+  distance<-sqrt(
+    (origin$x - destination$x)^2 +
+      (origin$y - destination$y)^2
+  )
+  max_distance<-sqrt(
+    (grid_nx - 1)^2 +
+      (grid_ny - 1)^2
+  )
+  travel_cost<-distance / max_distance
+  path_cells<-cells_on_straight_line(
+    origin_cell,
+    destination_cell,
+    land_grid
+  )
+  intermediate_cells<-setdiff(
+    path_cells,
+    c(origin_cell, destination_cell)
+  )
+  other_designated<-designated_cells %>%
+    filter(.data$agent_id!=.env$agent_id) %>%
+    pull(cell_id) %>%
+    unique()
+  social_cost<-if (
+    length(intermediate_cells) == 0
+  ) {
+    0
+  } else {
+    mean(
+      intermediate_cells %in% other_designated
+    )
+  }
+  total_cost<-travel_cost_weight*travel_cost+social_cost_weight*social_cost
+  list(
+    travel_cost = travel_cost,
+    social_cost = social_cost,
+    total_cost = total_cost,
+    path_cells = path_cells
+  )
+}
+```
+
+```{r test-emergency-cost, include=FALSE}
+cost_test<-map_dfr(
+  unassigned_cells,
+  function(dest) {
+    cost<-emergency_movement_cost(
+      agent_id = "A1",
+      origin_cell = 1,
+      destination_cell = dest,
+      land_grid = land_grid_initial
+    )
+    tibble(
+      destination = dest,
+      travel = cost$travel_cost,
+      social = cost$social_cost,
+      total = cost$total_cost
+    )
+  }
+)
+cost_test %>%
+  pivot_longer(
+    c(travel, social),
+    names_to = "cost_type",
+    values_to = "cost"
+  ) %>%
+  ggplot(aes(factor(destination), cost, fill = cost_type)) +
+  geom_col() +
+  labs(
+    title = "TEST: 50/50 travel and social components",
+    x = "Candidate emergency cell",
+    y = "Unweighted component"
+  ) +
+  theme_minimal()
+```
+
+##12.3 Emergency candidate set
+
+An emergency destination must:
+
+- be unassigned;
+- be better than both designated cells;
+- therefore be non-degraded when both designated cells are degraded.
+
+Among valid candidates, the basic version chooses the cell with the lowest combined emergency cost.
+
+```{r emergency-trigger}
+emergency_active<-function(
+    agent_id,
+    weather,
+    land_grid
+) {
+  if (weather != "drought") {
+    return(FALSE)
+  }
+  designated<-designated_cells %>%
+    filter(.data$agent_id==.env$agent_id) %>%
+    pull(cell_id)
+  conditions<-land_grid %>%
+    filter(cell_id %in% designated) %>%
+    arrange(match(cell_id, designated)) %>%
+    pull(rangeland_condition)
+  length(conditions) == 2 &&
+    all(conditions == "degraded")
+}
+select_emergency_cell<-function(
+    agent_id,
+    origin_cell,
+    land_grid
+) {
+  designated<-designated_cells %>%
+    filter(.data$agent_id==.env$agent_id) %>%
+    pull(cell_id)
+  designated_scores<-land_grid %>%
+    filter(cell_id %in% designated) %>%
+    pull(rangeland_condition) %>%
+    degradation_score[.]
+  #Candidate must be strictly better than BOTH designated cells.
+  max_allowed_score<-min(designated_scores)
+  candidates<-land_grid %>%
+    filter(
+      cell_id %in% unassigned_cells,
+      degradation_score[rangeland_condition] < max_allowed_score
+    )
+  if (nrow(candidates) == 0) {
+    return(NULL)
+  }
+  candidate_costs<-map_dfr(
+    candidates$cell_id,
+    function(destination_cell) {
+      cost<-emergency_movement_cost(
+        agent_id = agent_id,
+        origin_cell = origin_cell,
+        destination_cell = destination_cell,
+        land_grid = land_grid
+      )
+      tibble(
+        destination_cell = destination_cell,
+        travel_cost = cost$travel_cost,
+        social_cost = cost$social_cost,
+        total_cost = cost$total_cost
+      )
+    }
+  )
+  best<-candidate_costs %>%
+    filter(total_cost == min(total_cost)) %>%
+    slice_sample(n = 1)
+  list(
+    cell_id = best$destination_cell,
+    travel_cost = best$travel_cost,
+    social_cost = best$social_cost,
+    total_cost = best$total_cost,
+    all_candidates = candidate_costs
+  )
+}
+resolve_location<-function(
+    agent_id,
+    step,
+    weather,
+    land_grid
+) {
+  normal_cell<-normal_cell_for_step(
+    agent_id,
+    step
+  )
+  if (!emergency_active(
+    agent_id,
+    weather,
+    land_grid
+  )) {
+    return(list(
+      cell_id = normal_cell,
+      movement_mode = "designated",
+      emergency_cost = 0,
+      travel_cost = 0,
+      social_cost = 0
+    ))
+  }
+  emergency<-select_emergency_cell(
+    agent_id = agent_id,
+    origin_cell = normal_cell,
+    land_grid = land_grid
+  )
+  if (is.null(emergency)) {
+    return(list(
+      cell_id = normal_cell,
+      movement_mode = "emergency_no_destination",
+      emergency_cost = 0,
+      travel_cost = 0,
+      social_cost = 0
+    ))
+  }
+  list(
+    cell_id = emergency$cell_id,
+    movement_mode = "emergency",
+    emergency_cost = emergency$total_cost,
+    travel_cost = emergency$travel_cost,
+    social_cost = emergency$social_cost
+  )
+}
+```
+
+```{r test-emergency-trigger, include=FALSE}
+emergency_grid_test<-land_grid_initial
+a1_cells<-designated_cells %>%
+  filter(agent_id == "A1") %>%
+  pull(cell_id)
+emergency_grid_test$rangeland_condition[
+  emergency_grid_test$cell_id %in% a1_cells
+]<-"degraded"
+emergency_grid_test$condition_ema_score[
+  emergency_grid_test$cell_id %in% a1_cells
+]<-3
+stopifnot(
+  emergency_active(
+    "A1",
+    "drought",
+    emergency_grid_test
+  )
+)
+stopifnot(
+  !emergency_active(
+    "A1",
+    "normal",
+    emergency_grid_test
+  )
+)
+emergency_demo<-resolve_location(
+  agent_id = "A1",
+  step = 1,
+  weather = "drought",
+  land_grid = emergency_grid_test
+)
+stopifnot(
+  emergency_demo$cell_id %in% unassigned_cells
+)
+stopifnot(
+  emergency_grid_test$rangeland_condition[
+    emergency_grid_test$cell_id == emergency_demo$cell_id
+  ] != "degraded"
+)
+land_grid_initial %>%
+  mutate(
+    role = case_when(
+      cell_id %in% a1_cells ~ "A1 designated (degraded)",
+      cell_id == emergency_demo$cell_id ~ "Selected emergency cell",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ggplot(aes(x, y, fill = role, label = cell_id)) +
+  geom_tile(colour = "white") +
+  geom_text() +
+  coord_equal() +
+  scale_y_reverse() +
+  labs(
+    title = "TEST: drought + two degraded designated cells activates emergency movement"
+  ) +
+  theme_minimal()
+```
+
+#13. Outcome-based PES reward
+
+This is the only substantive change from the action-based PES model.
+
+Livestock income is still determined by the chosen stocking action and expected stock survival under the current rangeland condition \(C_t\). PES is instead conditioned on the resulting EMA-defined rangeland condition \(C_{t+1}\) of the cell grazed at time \(t\).
+
+\[
+r_t^{gross}
+=
+0.5\,I(A_t,C_t)
++
+0.5\,P(C_{t+1}).
+\]
+
+The action-based model's co-location and emergency-cost structure is retained:
+
+\[
+r_t
+=
+r_t^{gross}\times interaction\_multiplier
+-
+emergency\_cost\_scale\times emergency\_cost.
+\]
+
+```{r reward}
+get_stock_survival<-function(action,rangeland_condition){
+  unname(stock_survival[rangeland_condition,action])
+}
+
+compute_reward<-function(
+    action,
+    rangeland_condition,
+    resulting_condition,
+    n_agents_same_cell=1L,
+    emergency_cost=0
+){
+  survival_rate<-get_stock_survival(
+    action=action,
+    rangeland_condition=rangeland_condition
+  )
+  intended_herd_size<-unname(action_herd_size[[action]])
+  expected_surviving_herd<-intended_herd_size*survival_rate
+  expected_stock_loss<-intended_herd_size-expected_surviving_herd
+  livestock_income<-herd_income[[action]]*survival_rate
+  state_pes_reward<-unname(state_pes[[resulting_condition]])
+  gross_reward<-livestock_income+state_pes_reward
+  interaction_multiplier<-colocation_multiplier^max(n_agents_same_cell-1L,0L)
+  reward_after_interaction<-gross_reward*interaction_multiplier
+  net_reward<-reward_after_interaction-emergency_cost_scale*emergency_cost
+
+  list(
+    net_reward=net_reward,
+    livestock_income=livestock_income,
+    state_pes_reward=state_pes_reward,
+    gross_reward=gross_reward,
+    interaction_multiplier=interaction_multiplier,
+    emergency_cost=emergency_cost,
+    stock_survival=survival_rate,
+    intended_herd_size=intended_herd_size,
+    expected_surviving_herd=expected_surviving_herd,
+    expected_stock_loss=expected_stock_loss
+  )
+}
+```
+
+```{r test-reward, include=FALSE}
+reward_test<-expand_grid(
+  action=actions,
+  current_condition=r_states,
+  resulting_condition=r_states
+)%>%
+  mutate(
+    reward=pmap_dbl(
+      list(action,current_condition,resulting_condition),
+      ~compute_reward(
+        action=..1,
+        rangeland_condition=..2,
+        resulting_condition=..3
+      )$net_reward
+    )
+  )
+
+stopifnot(all(stock_survival>=0&stock_survival<=1))
+stopifnot(all(
+  map_dbl(
+    actions,
+    ~compute_reward(.x,"degraded","intact")$livestock_income
+  )<herd_income[actions]
+))
+stopifnot(
+  compute_reward("200-400","good","intact")$state_pes_reward==
+    state_pes[["intact"]]
+)
+stopifnot(
+  compute_reward("200-400","good","degraded")$state_pes_reward==
+    state_pes[["degraded"]]
+)
+
+outcome_reward_check<-compute_reward(
+  "200-400",
+  "good",
+  "intact",
+  n_agents_same_cell=1L,
+  emergency_cost=0
+)
+stopifnot(abs(
+  outcome_reward_check$gross_reward-
+    (
+      herd_income[["200-400"]]*stock_survival["good","200-400"]+
+        state_pes[["intact"]]
+    )
+)<1e-12)
+
+reward_no_emergency<-compute_reward(
+  "200-400","good","good",emergency_cost=0
+)$net_reward
+reward_with_emergency<-compute_reward(
+  "200-400","good","good",emergency_cost=0.4
+)$net_reward
+stopifnot(abs(
+  (reward_no_emergency-reward_with_emergency)-
+    emergency_cost_scale*0.4
+)<1e-12)
+
+reward_test%>%
+  filter(current_condition=="good")%>%
+  ggplot(aes(action,reward,fill=resulting_condition))+
+  geom_col(position="dodge")+
+  labs(
+    title="TEST: Outcome-based PES reward enters MADDPG learning",
+    subtitle="Livestock income uses C_t; PES uses resulting EMA-defined C_(t+1)",
+    y="Net reward"
+  )+
+  theme_minimal()
+```
+
+#14. MADDPG actor-critic update
+
+The policy is updated through the standard one-step temporal-difference rule.
+
+```{r maddpg-training}
+agent_obs_cols<-function(i){
+  ((i-1L)*observation_dim+1L):(i*observation_dim)
+}
+
+agent_action_cols<-function(i){
+  action_dim<-length(actions)
+  ((i-1L)*action_dim+1L):(i*action_dim)
+}
+
+soft_update_module<-function(target,source,tau_value=target_tau){
+  target_parameters<-target$parameters
+  source_parameters<-source$parameters
+
+  stopifnot(length(target_parameters)==length(source_parameters))
+
+  with_no_grad({
+    for(k in seq_along(target_parameters)){
+      target_parameters[[k]]$mul_(1-tau_value)
+      target_parameters[[k]]$add_(
+        source_parameters[[k]],
+        alpha=tau_value
+      )
+    }
+  })
+
+  invisible(target)
+}
+
+build_joint_policy_actions<-function(
+    system,
+    joint_obs_tensor,
+    joint_mask_tensor,
+    focal_agent=NULL,
+    target=FALSE
+){
+  action_tensors<-vector("list",length(system$agent_ids))
+
+  for(j in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[j]]
+    obs_j<-joint_obs_tensor[,agent_obs_cols(j)]
+    mask_j<-joint_mask_tensor[,agent_action_cols(j)]
+
+    actor<-if(target){
+      system$target_actors[[id]]
+    }else{
+      system$actors[[id]]
+    }
+
+    logits<-actor(obs_j)
+    masked_logits<-mask_logits_tensor(logits,mask_j)
+
+    if(target){
+      # Target actions are deterministic soft probability vectors.
+      # The critic accepts continuous action vectors during learning.
+      action_j<-nnf_softmax(masked_logits,dim=2)
+    }else if(identical(id,focal_agent)){
+      # Straight-through Gumbel-Softmax: hard in the forward pass,
+      # differentiable in the backward pass.
+      action_j<-nnf_gumbel_softmax(
+        masked_logits,
+        tau=gumbel_tau,
+        hard=TRUE,
+        dim=2
+      )
+    }else{
+      # Other agents are treated as fixed while actor i is updated.
+      action_j<-nnf_softmax(masked_logits,dim=2)$detach()
+    }
+
+    action_tensors[[j]]<-action_j
+  }
+
+  torch_cat(action_tensors,dim=2)
+}
+
+maddpg_train_step<-function(system,replay_buffer){
+  if(replay_buffer$size<learning_starts){
+    return(
+      list(
+        system=system,
+        log=tibble()
+      )
+    )
+  }
+
+  batch<-replay_sample(
+    replay_buffer,
+    n=batch_size
+  )
+
+  obs_tensor<-torch_tensor(batch$obs,dtype=torch_float())
+  actions_tensor<-torch_tensor(batch$actions,dtype=torch_float())
+  rewards_tensor<-torch_tensor(batch$rewards,dtype=torch_float())
+  next_obs_tensor<-torch_tensor(batch$next_obs,dtype=torch_float())
+  masks_tensor<-torch_tensor(batch$masks,dtype=torch_float())
+  next_masks_tensor<-torch_tensor(batch$next_masks,dtype=torch_float())
+  done_tensor<-torch_tensor(batch$done,dtype=torch_float())
+
+  loss_rows<-vector("list",length(system$agent_ids))
+
+  # ---------------------------
+  # 1. Centralised critic update
+  # ---------------------------
+  target_joint_actions<-with_no_grad({
+    build_joint_policy_actions(
+      system=system,
+      joint_obs_tensor=next_obs_tensor,
+      joint_mask_tensor=next_masks_tensor,
+      target=TRUE
+    )
+  })
+
+  critic_losses<-numeric(length(system$agent_ids))
+
+  for(i in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[i]]
+
+    system$critics[[id]]$train()
+    system$critic_optimizers[[id]]$zero_grad()
+
+    q_pred<-system$critics[[id]](
+      obs_tensor,
+      actions_tensor
+    )
+
+    reward_i<-rewards_tensor[,i]$unsqueeze(2)
+
+    q_next<-with_no_grad({
+      system$target_critics[[id]](
+        next_obs_tensor,
+        target_joint_actions
+      )
+    })
+
+    q_target<-reward_i+
+      gamma*(1-done_tensor)*q_next
+
+    critic_loss<-nnf_mse_loss(
+      q_pred,
+      q_target
+    )
+
+    critic_loss$backward()
+    system$critic_optimizers[[id]]$step()
+
+    critic_losses[[i]]<-critic_loss$item()
+  }
+
+  # ---------------------------
+  # 2. Decentralised actor update
+  # ---------------------------
+  actor_losses<-numeric(length(system$agent_ids))
+
+  for(i in seq_along(system$agent_ids)){
+    id<-system$agent_ids[[i]]
+
+    system$actors[[id]]$train()
+    system$actor_optimizers[[id]]$zero_grad()
+    system$critic_optimizers[[id]]$zero_grad()
+
+    policy_joint_actions<-build_joint_policy_actions(
+      system=system,
+      joint_obs_tensor=obs_tensor,
+      joint_mask_tensor=masks_tensor,
+      focal_agent=id,
+      target=FALSE
+    )
+
+    actor_loss<-
+      -system$critics[[id]](
+        obs_tensor,
+        policy_joint_actions
+      )$mean()
+
+    actor_loss$backward()
+    system$actor_optimizers[[id]]$step()
+
+    actor_losses[[i]]<-actor_loss$item()
+  }
+
+  # ---------------------------
+  # 3. Polyak target-network update
+  # ---------------------------
+  for(id in system$agent_ids){
+    soft_update_module(
+      system$target_actors[[id]],
+      system$actors[[id]]
+    )
+    soft_update_module(
+      system$target_critics[[id]],
+      system$critics[[id]]
+    )
+  }
+
+  system$updates<-system$updates+1L
+
+  log<-tibble(
+    update=system$updates,
+    agent_id=system$agent_ids,
+    actor_loss=actor_losses,
+    critic_loss=critic_losses
+  )
+
+  list(
+    system=system,
+    log=log
+  )
+}
+```
+
+```{r test-maddpg-training, include=FALSE}
+training_system_test<-create_maddpg_system()
+training_buffer_test<-new_replay_buffer(100L)
+
+dummy_obs<-matrix(
+  0,
+  nrow=length(initial_actions),
+  ncol=observation_dim
+)
+dummy_obs[,1]<-1
+dummy_action<-diag(length(actions))[
+  rep(1,length(initial_actions)),
+  ,
+  drop=FALSE
+]
+dummy_masks<-matrix(
+  1,
+  nrow=length(initial_actions),
+  ncol=length(actions)
+)
+
+for(i in seq_len(learning_starts)){
+  replay_add(
+    training_buffer_test,
+    obs=dummy_obs,
+    action_onehot=dummy_action,
+    rewards=rep(0,length(initial_actions)),
+    next_obs=dummy_obs,
+    masks=dummy_masks,
+    next_masks=dummy_masks,
+    done=0
+  )
+}
+
+training_update_test<-maddpg_train_step(
+  training_system_test,
+  training_buffer_test
+)
+
+stopifnot(nrow(training_update_test$log)==length(initial_actions))
+stopifnot(all(is.finite(training_update_test$log$actor_loss)))
+stopifnot(all(is.finite(training_update_test$log$critic_loss)))
+```
+
+#15. Convert combined herd pressure to an ecological action
+
+If several agents occupy the same cell, their herd sizes are added before the ecological transition is sampled.
+
+This is separate from the reward co-location penalty.
+
+```{r combined-pressure}
+herd_size_to_action<-function(total_herd_size) {
+  case_when(
+    total_herd_size <= 0 ~ "none",
+    total_herd_size < 200 ~ "<200",
+    total_herd_size < 400 ~ "200-400",
+    total_herd_size < 600 ~ "400-600",
+    TRUE ~ ">600"
+  )
+}
+```
+
+```{r test-combined-pressure, include=FALSE}
+stopifnot(
+  herd_size_to_action(0) == "none",
+  herd_size_to_action(100) == "<200",
+  herd_size_to_action(300) == "200-400",
+  herd_size_to_action(500) == "400-600",
+  herd_size_to_action(700) == ">600",
+  herd_size_to_action(1400) == ">600"
+)
+```
+
+#16. Update the landscape once per step
+
+Each of the 25 cells is updated once per iteration and keeps its own persistent ecological EMA. For grazed cells, the stochastic ecological transition uses the **combined** herd pressure of all agents present. For ungrazed cells, ecological action is `none`: grazing pressure is zero, but weather still affects the stochastic transition outcome. A previously grazed emergency cell therefore retains its ecological history after the herder leaves. Every update is written to the cell-level ledger.
+
+```{r landscape-update}
+update_landscape<-function(land_grid,action_log,transition_weather,step){
+  pressure_by_cell<-action_log%>%
+    group_by(cell_id)%>%
+    summarise(total_herd_size=sum(herd_size),n_agents=n(),.groups="drop")%>%
+    mutate(ecological_footprint=map_chr(total_herd_size,herd_size_to_action))
+  new_grid<-land_grid
+  ledger_list<-vector("list",nrow(land_grid))
+  for(j in seq_len(nrow(land_grid))){
+    cell<-land_grid$cell_id[j]
+    current_condition<-land_grid$rangeland_condition[j]
+    old_ema<-land_grid$condition_ema_score[j]
+    pressure<-pressure_by_cell%>%filter(.data$cell_id==cell)
+    if(nrow(pressure)==0){
+      ecological_footprint<-"none"
+      total_herd_size<-0
+      n_agents<-0
+    }else{
+      ecological_footprint<-pressure$ecological_footprint[[1]]
+      total_herd_size<-pressure$total_herd_size[[1]]
+      n_agents<-pressure$n_agents[[1]]
+    }
+    transition_outcome<-sample_next_condition(
+      current_condition=current_condition,
+      action=ecological_footprint,
+      weather=transition_weather
+    )
+    memory_update<-update_cell_memory(old_ema=old_ema,transition_outcome=transition_outcome)
+    new_grid$condition_ema_score[j]<-memory_update$ema_score
+    new_grid$rangeland_condition[j]<-memory_update$condition
+    ledger_list[[j]]<-tibble(
+      step=step,
+      from_time=step,
+      to_time=step+1L,
+      cell_id=cell,
+      transition_weather=transition_weather,
+      condition_before=current_condition,
+      ecological_footprint=ecological_footprint,
+      transition_outcome=transition_outcome,
+      ema_before=old_ema,
+      ema_after=memory_update$ema_score,
+      condition_after=memory_update$condition,
+      total_herd_size=total_herd_size,
+      n_agents=n_agents
+    )
+  }
+  list(land_grid=new_grid,ledger=bind_rows(ledger_list))
+}
+```
+
+```{r test-landscape-update, include=FALSE}
+test_grid<-land_grid_initial
+test_grid$condition_ema_score[test_grid$cell_id==2]<-1.8
+test_grid$rangeland_condition[test_grid$cell_id==2]<-"poor"
+test_actions<-tibble(
+  agent_id=c("A1","A2"),
+  cell_id=c(1L,1L),
+  action=c(">600",">600"),
+  herd_size=c(700,700)
+)
+set.seed(101)
+land_update_test<-update_landscape(
+  land_grid=test_grid,
+  action_log=test_actions,
+  transition_weather="drought",
+  step=1L
+)
+stopifnot(nrow(land_update_test$ledger)==25)
+stopifnot(land_update_test$ledger$ecological_footprint[land_update_test$ledger$cell_id==1]==">600")
+stopifnot(land_update_test$ledger$total_herd_size[land_update_test$ledger$cell_id==1]==1400)
+stopifnot(land_update_test$ledger$ecological_footprint[land_update_test$ledger$cell_id==2]=="none")
+stopifnot(is.finite(land_update_test$land_grid$condition_ema_score[land_update_test$land_grid$cell_id==2]))
+stopifnot(land_update_test$ledger$ema_before[land_update_test$ledger$cell_id==2]==1.8)
+stopifnot(
+  land_update_test$land_grid$condition_ema_score[land_update_test$land_grid$cell_id==2]==
+  land_update_test$ledger$ema_after[land_update_test$ledger$cell_id==2]
+)
+```
+
+#17. One simultaneous MARL step
+
+This is the core multi-agent step.
+
+Order of operations:
+
+1. Resolve each agent's current location using the current EMA-defined landscape and current weather.
+2. Share current locations and previous stocking-category herd sizes.
+3. Construct \(s_t\).
+4. Restrict each agent to the same or adjacent stocking category relative to \(A_{t-1}\), then sample \(A_t\) from softmax Q over that feasible set.
+5. Calculate shared-cell interaction counts and retain current condition \(C_t\) for survival-adjusted livestock income.
+6. Update **every** cell from \(t\) to \(t+1\): combined \(A_t\) (or `none`) + \(W_{t+1}\) generates a stochastic transition outcome, updates the cell EMA, and defines \(C_{t+1}\).
+7. Read the resulting EMA-defined condition \(C_{t+1}\) of the cell grazed at time \(t\).
+8. Calculate the outcome-based reward using the same co-location and emergency-cost structure as the action-based model.
+9. Resolve next locations using \(W_{t+1}\) and the updated EMA-defined landscape.
+10. Construct \(s_{t+1}\).
+11. Update Q, maximizing only over actions feasible from \(A_t\).
+12. Update agent history and write ledgers.
+
+```{r marl-step}
+marl_step<-function(
+    agents,
+    land_grid,
+    weather,
+    next_weather,
+    step,
+    maddpg,
+    replay_buffer,
+    train=TRUE,
+    explore=TRUE
+){
+  # ------------------------------------------------------------
+  # A. Resolve locations in current state
+  # ------------------------------------------------------------
+  location_results<-map(
+    names(agents),
+    ~resolve_location(
+      agent_id=.x,
+      step=step,
+      weather=weather,
+      land_grid=land_grid
+    )
+  )
+  names(location_results)<-names(agents)
+
+  for(id in names(agents)){
+    agents[[id]]$current_cell<-location_results[[id]]$cell_id
+  }
+
+  # ------------------------------------------------------------
+  # B. Shared information before action selection
+  # ------------------------------------------------------------
+  shared_info<-share_agent_information(
+    agents,
+    land_grid
+  )
+
+  # ------------------------------------------------------------
+  # C. Local observations o_i,t
+  # ------------------------------------------------------------
+  state_keys<-setNames(
+    map_chr(
+      agents,
+      observe_agent_state,
+      land_grid=land_grid,
+      weather=weather,
+      shared_info=shared_info
+    ),
+    names(agents)
+  )
+
+  observation_list<-map(
+    agents,
+    observe_agent_vector,
+    land_grid=land_grid,
+    weather=weather,
+    shared_info=shared_info
+  )
+
+  observations<-do.call(
+    rbind,
+    observation_list
+  )
+  rownames(observations)<-names(agents)
+
+  current_masks<-do.call(
+    rbind,
+    lapply(
+      agents,
+      function(agent)action_mask(agent$previous_action)
+    )
+  )
+  rownames(current_masks)<-names(agents)
+
+  # ------------------------------------------------------------
+  # D. Decentralised actor choice with Gumbel-Softmax
+  # ------------------------------------------------------------
+  action_results<-setNames(
+    lapply(
+      seq_along(agents),
+      function(i){
+        id<-names(agents)[[i]]
+        select_action_actor(
+          actor=maddpg$actors[[id]],
+          observation=observations[i,],
+          previous_action=agents[[id]]$previous_action,
+          explore=explore
+        )
+      }
+    ),
+    names(agents)
+  )
+
+  chosen_actions<-setNames(
+    map_chr(action_results,"action"),
+    names(agents)
+  )
+
+  action_onehot<-do.call(
+    rbind,
+    lapply(action_results,`[[`,"one_hot")
+  )
+  rownames(action_onehot)<-names(agents)
+
+  herd_sizes<-action_herd_size[chosen_actions]
+
+  # ------------------------------------------------------------
+  # E. Simultaneous action log
+  # ------------------------------------------------------------
+  action_log<-tibble(
+    agent_id=names(agents),
+    cell_id=map_int(agents,"current_cell"),
+    previous_action=map_chr(agents,"previous_action"),
+    action=unname(chosen_actions),
+    herd_size=as.numeric(herd_sizes),
+    state_key=unname(state_keys),
+    feasible_actions=map_chr(
+      action_results,
+      ~paste(.x$feasible_actions,collapse=" | ")
+    ),
+    chosen_probability=map2_dbl(
+      action_results,
+      chosen_actions,
+      ~unname(.x$probabilities[[.y]])
+    ),
+    movement_mode=map_chr(location_results,"movement_mode"),
+    emergency_cost=map_dbl(location_results,"emergency_cost"),
+    travel_cost=map_dbl(location_results,"travel_cost"),
+    social_cost=map_dbl(location_results,"social_cost")
+  )%>%
+    group_by(cell_id)%>%
+    mutate(n_agents_same_cell=n())%>%
+    ungroup()
+
+  # ------------------------------------------------------------
+  # F. Retain current C_t for livestock income
+  # ------------------------------------------------------------
+  action_log<-action_log%>%
+    left_join(
+      land_grid%>%
+        select(cell_id,rangeland_condition),
+      by="cell_id"
+    )
+
+  # ------------------------------------------------------------
+  # G. Ecology evolves t -> t+1 before Outcome-PES is paid
+  # ------------------------------------------------------------
+  landscape_update<-update_landscape(
+    land_grid=land_grid,
+    action_log=action_log,
+    transition_weather=next_weather,
+    step=step
+  )
+
+  next_land_grid<-landscape_update$land_grid
+
+  # ------------------------------------------------------------
+  # H. Read C_(t+1) and calculate Outcome-PES reward
+  # ------------------------------------------------------------
+  outcome_lookup<-landscape_update$ledger%>%
+    select(
+      cell_id,
+      transition_outcome,
+      resulting_ema=ema_after,
+      resulting_condition=condition_after
+    )
+
+  action_log<-action_log%>%
+    left_join(outcome_lookup,by="cell_id")
+
+  reward_components<-pmap(
+    list(
+      action_log$action,
+      action_log$rangeland_condition,
+      action_log$resulting_condition,
+      action_log$n_agents_same_cell,
+      action_log$emergency_cost
+    ),
+    function(
+        action,
+        rangeland_condition,
+        resulting_condition,
+        n_agents_same_cell,
+        emergency_cost
+    ){
+      compute_reward(
+        action=action,
+        rangeland_condition=rangeland_condition,
+        resulting_condition=resulting_condition,
+        n_agents_same_cell=n_agents_same_cell,
+        emergency_cost=emergency_cost
+      )
+    }
+  )
+
+  action_log$reward<-map_dbl(reward_components,"net_reward")
+  action_log$livestock_income<-map_dbl(reward_components,"livestock_income")
+  action_log$state_pes_reward<-map_dbl(reward_components,"state_pes_reward")
+  action_log$gross_reward<-map_dbl(reward_components,"gross_reward")
+  action_log$stock_survival<-map_dbl(reward_components,"stock_survival")
+  action_log$expected_surviving_herd<-map_dbl(reward_components,"expected_surviving_herd")
+  action_log$expected_stock_loss<-map_dbl(reward_components,"expected_stock_loss")
+  action_log$interaction_multiplier<-map_dbl(reward_components,"interaction_multiplier")
+
+  # ------------------------------------------------------------
+  # I. Construct next locations and observations
+  # ------------------------------------------------------------
+  next_agents<-agents
+
+  for(id in names(next_agents)){
+    next_agents[[id]]$previous_action<-chosen_actions[[id]]
+    next_agents[[id]]$herd_size<-unname(
+      action_herd_size[[chosen_actions[[id]]]]
+    )
+
+    next_location<-resolve_location(
+      agent_id=id,
+      step=step+1L,
+      weather=next_weather,
+      land_grid=next_land_grid
+    )
+
+    next_agents[[id]]$current_cell<-next_location$cell_id
+  }
+
+  next_shared_info<-share_agent_information(
+    next_agents,
+    next_land_grid
+  )
+
+  next_state_keys<-setNames(
+    map_chr(
+      next_agents,
+      observe_agent_state,
+      land_grid=next_land_grid,
+      weather=next_weather,
+      shared_info=next_shared_info
+    ),
+    names(next_agents)
+  )
+
+  next_observation_list<-map(
+    next_agents,
+    observe_agent_vector,
+    land_grid=next_land_grid,
+    weather=next_weather,
+    shared_info=next_shared_info
+  )
+
+  next_observations<-do.call(
+    rbind,
+    next_observation_list
+  )
+  rownames(next_observations)<-names(next_agents)
+
+  next_masks<-do.call(
+    rbind,
+    lapply(
+      next_agents,
+      function(agent)action_mask(agent$previous_action)
+    )
+  )
+  rownames(next_masks)<-names(next_agents)
+
+  # ------------------------------------------------------------
+  # J. Store one joint transition in replay memory
+  # ------------------------------------------------------------
+  reward_vector<-setNames(
+    action_log$reward,
+    action_log$agent_id
+  )[names(agents)]
+
+  replay_add(
+    replay_buffer,
+    obs=observations,
+    action_onehot=action_onehot,
+    rewards=reward_vector,
+    next_obs=next_observations,
+    masks=current_masks,
+    next_masks=next_masks,
+    done=0
+  )
+
+  # ------------------------------------------------------------
+  # K. MADDPG gradient updates
+  # ------------------------------------------------------------
+  training_rows<-list()
+
+  if(train&&replay_buffer$size>=learning_starts){
+    for(u in seq_len(updates_per_step)){
+      update<-maddpg_train_step(
+        maddpg,
+        replay_buffer
+      )
+      maddpg<-update$system
+      training_rows[[u]]<-update$log
+    }
+  }
+
+  training_log<-bind_rows(training_rows)
+
+  if(nrow(training_log)>0){
+    training_log<-training_log%>%
+      mutate(step=step)
+  }
+
+  action_log<-action_log%>%
+    mutate(
+      step=step,
+      weather=weather,
+      next_weather=next_weather
+    )
+
+  list(
+    agents=next_agents,
+    maddpg=maddpg,
+    replay_buffer=replay_buffer,
+    land_grid=next_land_grid,
+    action_log=action_log,
+    cell_ledger=landscape_update$ledger,
+    training_log=training_log,
+    state_keys=state_keys,
+    next_state_keys=next_state_keys,
+    shared_info=shared_info,
+    next_shared_info=next_shared_info
+  )
+}
+```
+
+```{r test-marl-step, include=FALSE}
+set.seed(101)
+torch_manual_seed(101)
+
+one_step_system<-create_maddpg_system()
+one_step_buffer<-new_replay_buffer()
+
+one_step_test<-marl_step(
+  agents=agents_initial,
+  land_grid=land_grid_initial,
+  weather="normal",
+  next_weather="drought",
+  step=1,
+  maddpg=one_step_system,
+  replay_buffer=one_step_buffer,
+  train=TRUE,
+  explore=TRUE
+)
+
+stopifnot(nrow(one_step_test$action_log)==6)
+stopifnot(nrow(one_step_test$cell_ledger)==25)
+stopifnot(one_step_test$replay_buffer$size==1L)
+
+# Every realised action respects the adjacent-category constraint.
+stopifnot(all(
+  map2_lgl(
+    one_step_test$action_log$previous_action,
+    one_step_test$action_log$action,
+    ~.y%in%allowed_actions(.x)
+  )
+))
+
+# Ecology uses next weather to generate the next condition.
+stopifnot(all(
+  one_step_test$cell_ledger$transition_weather=="drought"
+))
+
+# Outcome-PES is paid from the resulting EMA-defined condition.
+stopifnot(all(
+  one_step_test$action_log$state_pes_reward==
+    unname(state_pes[one_step_test$action_log$resulting_condition])
+))
+
+stopifnot(all(
+  c("emergency_cost","travel_cost","social_cost")%in%
+    names(one_step_test$action_log)
+))
+```
+
+#18. Full MARL simulation
+
+The weather sequence has length `steps + 1` so that \(s'\) includes the next observed weather condition when Q is updated.
+
+```{r simulate-marl}
+simulate_marl<-function(
+    steps=300L,
+    seed=NULL,
+    initial_agents=NULL,
+    initial_land_grid=NULL,
+    initial_maddpg=NULL,
+    train=TRUE,
+    explore=TRUE,
+    return_maddpg=FALSE
+){
+  if(!is.null(seed)){
+    set.seed(seed)
+    torch_manual_seed(as.integer(seed))
+  }
+
+  agents<-if(is.null(initial_agents)){
+    setNames(
+      lapply(
+        names(initial_actions),
+        function(id){
+          create_agent(
+            agent_id=id,
+            initial_action=initial_actions[[id]]
+          )
+        }
+      ),
+      names(initial_actions)
+    )
+  }else{
+    initial_agents
+  }
+
+  land_grid<-if(is.null(initial_land_grid)){
+    make_land_grid()
+  }else{
+    initial_land_grid
+  }
+
+  maddpg<-if(is.null(initial_maddpg)){
+    create_maddpg_system(
+      agent_ids=names(agents)
+    )
+  }else{
+    initial_maddpg
+  }
+
+  replay_buffer<-new_replay_buffer()
+
+  # W_t is observed in o_t. W_(t+1) helps generate C_(t+1).
+  weather_sequence<-draw_weather(steps+1L)
+
+  action_logs<-vector("list",steps)
+  cell_ledgers<-vector("list",steps)
+  training_logs<-vector("list",steps)
+  shared_ledgers<-vector("list",steps)
+  landscape_counts<-vector("list",steps)
+
+  for(t in seq_len(steps)){
+    result<-marl_step(
+      agents=agents,
+      land_grid=land_grid,
+      weather=weather_sequence[t],
+      next_weather=weather_sequence[t+1L],
+      step=t,
+      maddpg=maddpg,
+      replay_buffer=replay_buffer,
+      train=train,
+      explore=explore
+    )
+
+    agents<-result$agents
+    maddpg<-result$maddpg
+    replay_buffer<-result$replay_buffer
+    land_grid<-result$land_grid
+
+    action_logs[[t]]<-result$action_log
+    cell_ledgers[[t]]<-result$cell_ledger
+    training_logs[[t]]<-result$training_log
+    shared_ledgers[[t]]<-result$shared_info%>%
+      mutate(step=t)
+
+    condition_count<-table(
+      factor(
+        land_grid$rangeland_condition,
+        levels=r_states
+      )
+    )
+
+    landscape_counts[[t]]<-tibble(
+      step=t,
+      intact=unname(condition_count["intact"]),
+      good=unname(condition_count["good"]),
+      poor=unname(condition_count["poor"]),
+      degraded=unname(condition_count["degraded"]),
+      pct_degraded=
+        100*unname(condition_count["degraded"])/nrow(land_grid),
+      mean_ema=mean(land_grid$condition_ema_score),
+      max_ema=max(land_grid$condition_ema_score)
+    )
+  }
+
+  list(
+    agents=agents,
+    maddpg=if(return_maddpg)maddpg else NULL,
+    replay_size=replay_buffer$size,
+    land_grid=land_grid,
+    weather=weather_sequence,
+    action_log=bind_rows(action_logs),
+    cell_ledger=bind_rows(cell_ledgers),
+    training_log=bind_rows(training_logs),
+    shared_ledger=bind_rows(shared_ledgers),
+    landscape_counts=bind_rows(landscape_counts)
+  )
+}
+```
+
+```{r test-simulation, include=FALSE}
+simulation_test<-simulate_marl(
+  steps=100L,
+  seed=321L,
+  train=TRUE,
+  explore=TRUE
+)
+
+stopifnot(nrow(simulation_test$action_log)==100*6)
+stopifnot(nrow(simulation_test$cell_ledger)==100*25)
+stopifnot(simulation_test$replay_size==100L)
+stopifnot(nrow(simulation_test$training_log)>0)
+
+stopifnot(all(
+  simulation_test$landscape_counts$degraded>=0&
+    simulation_test$landscape_counts$degraded<=25
+))
+
+# The environment must generate stochastic transition outcomes.
+stopifnot(any(
+  simulation_test$cell_ledger$transition_outcome!=
+    simulation_test$cell_ledger$condition_before
+))
+
+# Ungrazed cells retain ecological-memory updates.
+ungrazed_rows<-simulation_test$cell_ledger%>%
+  filter(ecological_footprint=="none")
+
+stopifnot(nrow(ungrazed_rows)>0)
+stopifnot(all(is.finite(ungrazed_rows$ema_after)))
+
+# Every realised herder action obeys the adjacent-category constraint.
+stopifnot(all(
+  map2_lgl(
+    simulation_test$action_log$previous_action,
+    simulation_test$action_log$action,
+    ~.y%in%allowed_actions(.x)
+  )
+))
+
+simulation_test$landscape_counts%>%
+  select(step,intact,good,poor,degraded,mean_ema,max_ema)%>%
+  tail()
+```
+
+##18.1 Short simulation diagnostic
+
+The diagnostic below plots all four EMA-defined landscape classes rather than only degraded cells. This makes it possible to see ecological transition before any cell reaches the degraded threshold.
+
+```{r diagnostic-short-simulation}
+simulation_test$landscape_counts %>%
+  select(step, intact, good, poor, degraded) %>%
+  pivot_longer(
+    cols = -step,
+    names_to = "condition",
+    values_to = "n_cells"
+  ) %>%
+  ggplot(aes(step, n_cells, colour = condition)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_continuous(limits = c(0, 25), breaks = 0:25) +
+  labs(
+    title = "Landscape condition through the 100-step test",
+    x = "Iteration",
+    y = "Number of cells",
+    colour = "Condition"
+  ) +
+  theme_minimal()
+simulation_test$landscape_counts %>%
+  ggplot(aes(step, mean_ema)) +
+  geom_line(linewidth = 0.8) +
+  geom_line(aes(y = max_ema), linetype = "dashed", linewidth = 0.8) +
+  geom_hline(yintercept = c(0.5, 1.5, 2.5), linetype = "dotted") +
+  labs(
+    title = "Cell ecological EMA through the 100-step test",
+    subtitle = "Solid = landscape mean; dashed = maximum cell EMA",
+    x = "Iteration",
+    y = "EMA severity"
+  ) +
+  theme_minimal()
+```
+
+#19. Train one MADDPG system
+
+This is one continuous learning trajectory. Actor and critic parameters, target networks and replay memory carry forward throughout the run.
+
+```{r train-model}
+results_train<-simulate_marl(
+  steps=500L,
+  seed=128L,
+  train=TRUE,
+  explore=TRUE,
+  return_maddpg=TRUE
+)
+```
+
+#20. Core diagnostics
+
+##20.1 Landscape degradation
+
+Both count and percentage are retained. The count is especially informative for a 25-cell landscape.
+
+```{r plot-degradation}
+p_degraded_pct<-results_train$landscape_counts %>%
+  ggplot(aes(step, pct_degraded)) +
+  geom_line() +
+  labs(
+    title = "Percentage of degraded cells",
+    x = "Step",
+    y = "Degraded cells (%)"
+  ) +
+  theme_minimal()
+p_degraded_pct
+```
+
+##20.2 Action mix through time
+
+```{r plot-action-mix}
+results_train$action_log %>%
+  mutate(
+    period = cut(
+      step,
+      breaks = seq(0, 250, by = 50),
+      include.lowest = TRUE
+    )
+  ) %>%
+  count(period, action) %>%
+  group_by(period) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(period, prop, fill = action)) +
+  geom_col() +
+  labs(
+    title = "Learned stocking-action mix through time",
+    x = "Training period",
+    y = "Proportion of choices",
+    fill = "Action"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+```
+
+##20.3 Emergency movements
+
+```{r plot-emergency}
+results_train$action_log %>%
+  count(step, movement_mode) %>%
+  ggplot(aes(step, n, fill = movement_mode)) +
+  geom_col() +
+  labs(
+    title = "Emergency and designated-pasture movement",
+    x = "Step",
+    y = "Number of agents",
+    fill = "Movement mode"
+  ) +
+  theme_minimal()
+```
+
+##20.4 Co-location events
+
+```{r plot-colocation}
+results_train$action_log %>%
+  mutate(
+    colocated = n_agents_same_cell > 1
+  ) %>%
+  count(step, colocated) %>%
+  filter(colocated) %>%
+  ggplot(aes(step, n)) +
+  geom_col() +
+  labs(
+    title = "Same-cell co-location events",
+    x = "Step",
+    y = "Agents experiencing co-location"
+  ) +
+  theme_minimal()
+```
+
+##20.5 MADDPG learning losses
+
+```{r plot-maddpg-losses}
+results_train$training_log%>%
+  pivot_longer(
+    cols=c(actor_loss,critic_loss),
+    names_to="loss_type",
+    values_to="loss"
+  )%>%
+  mutate(
+    period=ceiling(step/25)
+  )%>%
+  group_by(
+    period,
+    agent_id,
+    loss_type
+  )%>%
+  summarise(
+    mean_loss=mean(loss),
+    .groups="drop"
+  )%>%
+  ggplot(
+    aes(
+      period,
+      mean_loss,
+      colour=loss_type
+    )
+  )+
+  geom_line()+
+  facet_wrap(~agent_id,scales="free_y")+
+  labs(
+    title="MADDPG actor and critic losses through learning",
+    x="25-step period",
+    y="Mean loss",
+    colour="Loss"
+  )+
+  theme_minimal()
+```
+
+##20.6 Cell-level ecological ledger
+
+This avoids hiding ecological dynamics inside one aggregate degradation percentage.
+
+```{r plot-cell-ledger}
+condition_numeric<-c(
+  intact = 0,
+  good = 1,
+  poor = 2,
+  degraded = 3
+)
+results_train$cell_ledger %>%
+  mutate(
+    condition_value =
+      condition_numeric[condition_after]
+  ) %>%
+  ggplot(
+    aes(
+      step,
+      factor(cell_id),
+      fill = condition_value
+    )
+  ) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    breaks = 0:3,
+    labels = r_states
+  ) +
+  labs(
+    title = "Cell-level ecological ledger",
+    x = "Step",
+    y = "Cell ID",
+    fill = "Condition"
+  ) +
+  theme_minimal()
+```
+
+#21. Independent replicate workflow
+
+A continuous training trajectory and independent simulation replicates are not the same thing.
+
+This function creates genuinely independent runs by resetting both:
+
+- the ecological landscape;
+- all six actor/critic networks.
+
+```{r independent-replicates}
+get_parallel_workers<-function(max_workers=6L,reserve=2L){
+  available<-as.integer(future::availableCores())
+  as.integer(
+    max(
+      1L,
+      min(max_workers,max(1L,available-reserve))
+    )
+  )
+}
+
+run_independent_replicates<-function(
+    n_runs=20L,
+    steps=500L,
+    seed_start=1000L,
+    workers=NULL
+){
+  if(!requireNamespace("future",quietly=TRUE)||
+     !requireNamespace("furrr",quietly=TRUE)){
+    stop(
+      "Parallel runs require packages 'future' and 'furrr'. ",
+      "Install once with install.packages(c('future','furrr'))."
+    )
+  }
+
+  if(is.null(workers)){
+    workers<-get_parallel_workers()
+  }
+
+  workers<-as.integer(max(1L,workers))
+
+  message(
+    "Running ",
+    n_runs,
+    " independent MADDPG simulations on ",
+    workers,
+    " workers."
+  )
+
+  future::plan(
+    future::multisession,
+    workers=workers
+  )
+
+  on.exit(
+    future::plan(future::sequential),
+    add=TRUE
+  )
+
+  furrr::future_map_dfr(
+    seq_len(n_runs),
+    function(run_id){
+      # Each replicate constructs new actors, critics, target networks
+      # and a new replay buffer inside simulate_marl().
+      res<-simulate_marl(
+        steps=steps,
+        seed=seed_start+run_id,
+        train=TRUE,
+        explore=TRUE,
+        return_maddpg=FALSE
+      )
+
+      res$landscape_counts%>%
+        mutate(run=run_id)
+    },
+    .options=furrr::furrr_options(
+      seed=TRUE,
+      scheduling=1,
+      packages=c("torch","tidyverse","purrr")
+    )
+  )
+}
+
+replicate_degradation_OB<-run_independent_replicates(
+  n_runs=20L,
+  steps=500L,
+  seed_start=2000L
+)
+```
+
+```{r test-independent-replicates, include=FALSE}
+stopifnot(
+  n_distinct(
+    replicate_degradation_OB$run
+  ) == 20
+)
+replicate_degradation_OB%>%
+  ggplot(
+    aes(
+      step,
+      degraded,
+      group = run
+    )
+  ) +
+  geom_line(alpha = 0.2) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    linewidth = 1
+  ) +
+  labs(
+    title = "TEST: independent runs are done correctly",
+    y = "Number of degraded cells"
+  ) +
+  theme_minimal()
+```
+
+```{r action mix visualisation, include=FALSE}
+# ============================================================
+# ACTION MIX UNDER DIFFERENT PES LEVELS
+# ============================================================
+
+outcome_order<-c("<200","200-400","400-600",">600")
+
+outcome_cols<-c(
+  "<200"="#F3B6C6",
+  "200-400"="#D77FB3",
+  "400-600"="#A64F9E",
+  ">600"="#5B2A86"
+)
+
+# Store calibrated baseline Outcome-PES payments
+base_state_pes<-state_pes
+
+run_outcome_pes_level<-function(
+    multiplier,
+    steps=500L,
+    seed=128L
+){
+
+  state_pes<<-base_state_pes*multiplier
+
+  res<-simulate_marl(
+    steps=steps,
+    seed=seed,
+    train=TRUE,
+    explore=TRUE
+  )
+
+  res$action_log%>%
+    mutate(
+      pes_multiplier=multiplier
+    )
+}
+
+# Small Outcome-PES grid
+pes_outcome_runs<-map_dfr(
+  c(0.5,1,1.5),
+  run_outcome_pes_level
+)
+
+# Restore baseline
+state_pes<-base_state_pes
+
+outcome_mix_pes<-pes_outcome_runs%>%
+  mutate(setting=case_when(pes_multiplier==0.5~"Low PES",
+                           pes_multiplier==1~"Baseline",
+                           pes_multiplier==1.5~"High PES"),
+         setting=factor(setting,levels=c("Low PES","Baseline","High PES")),
+         action=factor(action,levels=outcome_order))%>%
+  count(setting,step,action,name="n",.drop=FALSE)%>%
+  tidyr::complete(setting,step,action,fill=list(n=0))%>%
+  group_by(setting,step)%>%
+  mutate(prop=n/sum(n))%>%
+  ungroup()
+
+p_outcome_pes<-ggplot(outcome_mix_pes,aes(step,prop,fill=action))+
+  geom_area()+
+  facet_grid(setting~.)+
+  scale_fill_manual(values=outcome_cols,drop=FALSE)+
+  scale_y_continuous(limits=c(0,1),labels=scales::percent_format(accuracy=1))+
+  labs(x="Iteration",y="Proportion of actions",fill="Stocking action",
+       title="MADDPG action mix under different Outcome-PES levels")+
+  theme_minimal()
+
+p_outcome_pes
+```
+
+
